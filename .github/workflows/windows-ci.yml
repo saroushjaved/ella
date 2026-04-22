@@ -35,65 +35,26 @@ jobs:
           version: ${{ env.QT_VERSION }}
           arch: "win64_mingw"
           modules: "qtmultimedia qtpdf qtshadertools"
+          tools: "tools_mingw1310"
+          set-env: "true"
 
       - name: Use Qt bundled MinGW toolchain
         shell: pwsh
         run: |
-          $qtBases = @()
-          if ($env:Qt6_DIR -and (Test-Path $env:Qt6_DIR)) {
-            $qtBases += (Resolve-Path (Join-Path $env:Qt6_DIR "..\..\..\..\..")).Path
+          if (-not $env:IQTA_TOOLS -or -not (Test-Path $env:IQTA_TOOLS)) {
+            throw "IQTA_TOOLS is not set or missing. install-qt-action tools install failed."
           }
-          if ($env:RUNNER_WORKSPACE) {
-            $qtBases += (Join-Path $env:RUNNER_WORKSPACE "Qt")
-          }
-          if ($env:GITHUB_WORKSPACE) {
-            $qtBases += (Join-Path $env:GITHUB_WORKSPACE "Qt")
-            try {
-              $qtBases += (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "..\Qt") -ErrorAction Stop).Path
-            } catch {
-            }
+          if (-not $env:QT_ROOT_DIR -or -not (Test-Path $env:QT_ROOT_DIR)) {
+            throw "QT_ROOT_DIR is not set or missing."
           }
 
-          $qtBases = @($qtBases | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
-          if ($qtBases.Count -eq 0) {
-            throw "Could not locate Qt base directory. Checked Qt6_DIR, RUNNER_WORKSPACE\\Qt and GITHUB_WORKSPACE\\..\\Qt"
-          }
-
-          $qtMingwDir = $null
-          foreach ($base in $qtBases) {
-            $versionDirs = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
-              Sort-Object Name -Descending
-            foreach ($ver in $versionDirs) {
-              $candidate = Join-Path $ver.FullName "mingw_64"
-              $qtConfig = Join-Path $candidate "lib\cmake\Qt6\Qt6Config.cmake"
-              if (Test-Path $qtConfig) {
-                $qtMingwDir = $candidate
-                break
-              }
-            }
-            if ($qtMingwDir) {
-              break
-            }
-          }
-
-          if (-not $qtMingwDir) {
-            throw ("Qt mingw_64 directory not found under: " + ($qtBases -join ", "))
-          }
-
-          $qtRoot = (Resolve-Path (Join-Path $qtMingwDir "..\..")).Path
-          $toolsDir = Join-Path $qtRoot "Tools"
-          if (-not (Test-Path $toolsDir)) {
-            throw "Qt Tools directory not found: $toolsDir"
-          }
-
-          $mingwDir = Get-ChildItem -Path $toolsDir -Directory |
+          $mingwDir = Get-ChildItem -Path $env:IQTA_TOOLS -Directory |
             Where-Object { $_.Name -like "mingw*_64" } |
             Sort-Object Name -Descending |
             Select-Object -First 1
 
           if (-not $mingwDir) {
-            throw "No Qt MinGW toolchain found under $toolsDir"
+            throw "No Qt MinGW toolchain found under IQTA_TOOLS=$env:IQTA_TOOLS"
           }
 
           $mingwBin = Join-Path $mingwDir.FullName "bin"
@@ -101,15 +62,22 @@ jobs:
             throw "g++.exe not found in $mingwBin"
           }
 
+          $qt6CmakeDir = Join-Path $env:QT_ROOT_DIR "lib\cmake\Qt6"
+          if (-not (Test-Path (Join-Path $qt6CmakeDir "Qt6Config.cmake"))) {
+            throw "Qt6Config.cmake not found in $qt6CmakeDir"
+          }
+
           "PATH=$mingwBin;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CC=$mingwBin\gcc.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CXX=$mingwBin\g++.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "MINGW_MAKE=$mingwBin\mingw32-make.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "QT6_CMAKE_DIR=$qtMingwDir\lib\cmake\Qt6" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QT6_CMAKE_DIR=$qt6CmakeDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Verify compiler selection
         shell: pwsh
         run: |
+          Write-Host "QT_ROOT_DIR=$env:QT_ROOT_DIR"
+          Write-Host "IQTA_TOOLS=$env:IQTA_TOOLS"
           Write-Host "CC=$env:CC"
           Write-Host "CXX=$env:CXX"
           Write-Host "MINGW_MAKE=$env:MINGW_MAKE"
