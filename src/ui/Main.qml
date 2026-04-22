@@ -10,7 +10,6 @@ ApplicationWindow {
     width: 1540
     height: 920
     visible: true
-    icon: "qrc:/qt/qml/SecondBrain/src/ui/assets/ella_icon_256.png"
     title: "ELLA (Memory Browser)"
     color: tokens.bg
     font.family: tokens.fontFamily
