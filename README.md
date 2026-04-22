@@ -52,6 +52,15 @@ ctest --test-dir build-dev --output-on-failure -C Debug
 .\build-dev\appSecondBrain.exe
 ```
 
+## Beta Testing
+
+If you are testing beta builds, start here:
+
+- [Beta Tester Onboarding (Windows)](docs/beta-tester-onboarding.md)
+- [Closed Beta Release Checklist](docs/beta-release-checklist.md)
+- [Beta Operations Runbook](docs/beta-operations-runbook.md)
+- [Beta Release Notes Template](docs/beta-release-notes-template.md)
+
 ## Contributing
 
 We welcome open-source contributions through issues and pull requests.
