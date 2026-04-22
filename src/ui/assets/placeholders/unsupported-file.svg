@@ -1,0 +1,7 @@
+<svg width="360" height="240" viewBox="0 0 360 240" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="358" height="238" rx="16" fill="#F8FAFC" stroke="#D9E2EC"/>
+  <path d="M122 64H220L252 96V176C252 182.627 246.627 188 240 188H122C115.373 188 110 182.627 110 176V76C110 69.3726 115.373 64 122 64Z" fill="#E6F4F1" stroke="#0F766E" stroke-width="2"/>
+  <path d="M220 64V96H252" stroke="#0F766E" stroke-width="2"/>
+  <text x="181" y="133" text-anchor="middle" fill="#0F766E" font-size="44" font-family="Segoe UI, sans-serif">?</text>
+  <text x="180" y="204" text-anchor="middle" fill="#475569" font-size="14" font-family="Segoe UI, sans-serif">Preview not available</text>
+</svg>

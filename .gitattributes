@@ -1,0 +1,20 @@
+* text=auto eol=lf
+
+# Windows scripts and command files keep CRLF for readability in PowerShell/cmd
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Common binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.svg text
+*.ttf binary
+*.otf binary
+*.dll binary
+*.exe binary
+*.zip binary

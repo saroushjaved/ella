@@ -1,0 +1,7 @@
+<svg width="320" height="220" viewBox="0 0 320 220" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="318" height="218" rx="16" fill="#F8FAFC" stroke="#D9E2EC"/>
+  <circle cx="148" cy="96" r="40" fill="#E6F4F1"/>
+  <circle cx="144" cy="92" r="22" stroke="#0F766E" stroke-width="4"/>
+  <path d="M160 108L180 128" stroke="#0F766E" stroke-width="6" stroke-linecap="round"/>
+  <text x="160" y="164" text-anchor="middle" fill="#475569" font-size="14" font-family="Segoe UI, sans-serif">No memories recovered yet</text>
+</svg>

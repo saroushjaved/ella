@@ -1,0 +1,62 @@
+# Core build and packaged artifacts
+/build/
+/artifacts/
+/tools/
+/cmake-build-*/
+
+# Qt Creator / IDE metadata
+/.qtcreator/
+*.pro.user
+*.user
+
+# Local script downloads and temp content
+/scripts/.downloads/
+*.tmp
+*.temp
+
+# CMake / build system generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+install_manifest.txt
+
+# Logs and crash outputs
+*.log
+*.stackdump
+*.dmp
+
+# Binaries and libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.obj
+*.o
+*.pdb
+*.ilk
+
+# Archives / packages
+*.zip
+*.7z
+*.tar
+*.gz
+*.bz2
+*.msi
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Environment / secrets
+.env
+.env.*
+*.secret
+*.key

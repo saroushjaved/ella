@@ -1,0 +1,9 @@
+﻿<svg width="480" height="300" viewBox="0 0 480 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="480" height="300" rx="24" fill="#F8FAFC"/>
+  <rect x="104" y="62" width="272" height="176" rx="18" fill="#FFFFFF" stroke="#D9E2EC" stroke-width="2"/>
+  <circle cx="240" cy="132" r="40" fill="#E6F4F1"/>
+  <path d="M226 118L254 146M254 118L226 146" stroke="#0F766E" stroke-width="6" stroke-linecap="round"/>
+  <rect x="164" y="188" width="152" height="34" rx="9" fill="#E6F4F1" stroke="#A7D9D2"/>
+  <text x="240" y="210" text-anchor="middle" fill="#0F766E" font-family="Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">Preview unavailable</text>
+  <text x="240" y="254" text-anchor="middle" fill="#64748B" font-family="Segoe UI, Arial, sans-serif" font-size="12">Open the original file to continue.</text>
+</svg>
