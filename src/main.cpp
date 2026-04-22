@@ -12,6 +12,7 @@
 #include <QQmlContext>
 #include <QStringConverter>
 #include <QTextStream>
+#include <QWindow>
 
 #include "core/AppConfig.h"
 #include "database/DatabaseManager.h"
@@ -110,12 +111,23 @@ void initializeLogging()
     rotateLogsIfNeeded(AppConfig::activeLogFilePath());
     gPreviousHandler = qInstallMessageHandler(fileMessageHandler);
 }
+
+QIcon createAppIcon()
+{
+    // Prefer PNG for runtime reliability; fall back to ICO in resources.
+    QIcon icon(QStringLiteral("qrc:/qt/qml/SecondBrain/src/ui/assets/ella_icon_256.png"));
+    if (!icon.isNull()) {
+        return icon;
+    }
+    return QIcon(QStringLiteral("qrc:/qt/qml/SecondBrain/packaging/assets/ella_icon.ico"));
+}
 }
 
 int main(int argc, char *argv[])
 {
     QGuiApplication app(argc, argv);
-    app.setWindowIcon(QIcon(QStringLiteral("qrc:/qt/qml/SecondBrain/packaging/assets/ella_icon.ico")));
+    const QIcon appIcon = createAppIcon();
+    app.setWindowIcon(appIcon);
 
     app.setOrganizationName("Ella");
     app.setApplicationName("Ella");
@@ -175,6 +187,11 @@ int main(int argc, char *argv[])
         );
 
     engine.loadFromModule("SecondBrain", "Main");
+    if (!engine.rootObjects().isEmpty()) {
+        if (auto* window = qobject_cast<QWindow*>(engine.rootObjects().constFirst())) {
+            window->setIcon(appIcon);
+        }
+    }
 
     return app.exec();
 }
