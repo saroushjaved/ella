@@ -115,7 +115,7 @@ void initializeLogging()
 int main(int argc, char *argv[])
 {
     QGuiApplication app(argc, argv);
-    app.setWindowIcon(QIcon(QStringLiteral("qrc:/qt/qml/SecondBrain/src/ui/assets/ella_icon_256.png")));
+    app.setWindowIcon(QIcon(QStringLiteral("qrc:/qt/qml/SecondBrain/packaging/assets/ella_icon.ico")));
 
     app.setOrganizationName("Ella");
     app.setApplicationName("Ella");

@@ -88,6 +88,7 @@ qt_add_qml_module(appSecondBrain
         src/ui/MediaPreviewPanel.qml
     RESOURCES
         src/ui/assets/ASSET_MANIFEST.md
+        packaging/assets/ella_icon.ico
         src/ui/assets/ella_icon_256.png
         src/ui/assets/vendor/search.svg
         src/ui/assets/vendor/file-info.svg
