@@ -39,11 +39,49 @@ jobs:
       - name: Use Qt bundled MinGW toolchain
         shell: pwsh
         run: |
-          if (-not $env:Qt6_DIR) {
-            throw "Qt6_DIR is not set by install-qt-action."
+          $qtBases = @()
+          if ($env:Qt6_DIR -and (Test-Path $env:Qt6_DIR)) {
+            $qtBases += (Resolve-Path (Join-Path $env:Qt6_DIR "..\..\..\..\..")).Path
+          }
+          if ($env:RUNNER_WORKSPACE) {
+            $qtBases += (Join-Path $env:RUNNER_WORKSPACE "Qt")
+          }
+          if ($env:GITHUB_WORKSPACE) {
+            $qtBases += (Join-Path $env:GITHUB_WORKSPACE "Qt")
+            try {
+              $qtBases += (Resolve-Path (Join-Path $env:GITHUB_WORKSPACE "..\Qt") -ErrorAction Stop).Path
+            } catch {
+            }
           }
 
-          $qtRoot = (Resolve-Path (Join-Path $env:Qt6_DIR "..\..\..\..\..")).Path
+          $qtBases = @($qtBases | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique)
+          if ($qtBases.Count -eq 0) {
+            throw "Could not locate Qt base directory. Checked Qt6_DIR, RUNNER_WORKSPACE\\Qt and GITHUB_WORKSPACE\\..\\Qt"
+          }
+
+          $qtMingwDir = $null
+          foreach ($base in $qtBases) {
+            $versionDirs = Get-ChildItem -Path $base -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+              Sort-Object Name -Descending
+            foreach ($ver in $versionDirs) {
+              $candidate = Join-Path $ver.FullName "mingw_64"
+              $qtConfig = Join-Path $candidate "lib\cmake\Qt6\Qt6Config.cmake"
+              if (Test-Path $qtConfig) {
+                $qtMingwDir = $candidate
+                break
+              }
+            }
+            if ($qtMingwDir) {
+              break
+            }
+          }
+
+          if (-not $qtMingwDir) {
+            throw ("Qt mingw_64 directory not found under: " + ($qtBases -join ", "))
+          }
+
+          $qtRoot = (Resolve-Path (Join-Path $qtMingwDir "..\..")).Path
           $toolsDir = Join-Path $qtRoot "Tools"
           if (-not (Test-Path $toolsDir)) {
             throw "Qt Tools directory not found: $toolsDir"
@@ -67,6 +105,7 @@ jobs:
           "CC=$mingwBin\gcc.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CXX=$mingwBin\g++.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "MINGW_MAKE=$mingwBin\mingw32-make.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "QT6_CMAKE_DIR=$qtMingwDir\lib\cmake\Qt6" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Verify compiler selection
         shell: pwsh
@@ -74,6 +113,7 @@ jobs:
           Write-Host "CC=$env:CC"
           Write-Host "CXX=$env:CXX"
           Write-Host "MINGW_MAKE=$env:MINGW_MAKE"
+          Write-Host "QT6_CMAKE_DIR=$env:QT6_CMAKE_DIR"
           where.exe gcc
           where.exe g++
           & $env:CXX --version
@@ -85,6 +125,7 @@ jobs:
           -DCMAKE_C_COMPILER:FILEPATH=${{ env.CC }}
           -DCMAKE_CXX_COMPILER:FILEPATH=${{ env.CXX }}
           -DCMAKE_MAKE_PROGRAM:FILEPATH=${{ env.MINGW_MAKE }}
+          -DQt6_DIR:PATH=${{ env.QT6_CMAKE_DIR }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DELLA_RELEASE_VERSION=0.9.0-beta.ci
           -DELLA_RELEASE_CHANNEL=beta
