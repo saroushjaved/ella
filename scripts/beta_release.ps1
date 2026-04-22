@@ -13,6 +13,7 @@ $artifactDir = Join-Path $repoRoot (Join-Path $ArtifactRoot "ella-beta-win64-$Ve
 $stageDir = Join-Path $artifactDir "staging"
 $portableDir = Join-Path $artifactDir "portable"
 $qtConfPath = Join-Path $repoRoot "packaging/qt.conf"
+$installerIconPath = Join-Path $repoRoot "packaging/assets/ella_icon.ico"
 $innoScriptPath = Join-Path $repoRoot "packaging/ella-beta.iss"
 $buildRecoveryScript = Join-Path $repoRoot "scripts/build_with_recovery.ps1"
 
@@ -208,6 +209,9 @@ if (-not (Test-Path $appExe)) {
 Copy-Item $appExe -Destination $stageDir -Force
 if (Test-Path $qtConfPath) {
     Copy-Item $qtConfPath -Destination $stageDir -Force
+}
+if (Test-Path $installerIconPath) {
+    Copy-Item $installerIconPath -Destination (Join-Path $stageDir "ella_icon.ico") -Force
 }
 
 $toolsDir = Join-Path $repoRoot "tools"

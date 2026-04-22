@@ -61,6 +61,16 @@ qt_add_executable(appSecondBrain
     src/notes/RichTextFormatter.cpp
 )
 
+if (WIN32)
+    set(ELLA_APP_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/packaging/assets/ella_icon.ico")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ella_app_icon.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/ella_app_icon.rc"
+        @ONLY
+    )
+    target_sources(appSecondBrain PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ella_app_icon.rc")
+endif()
+
 qt_add_qml_module(appSecondBrain
     URI SecondBrain
     VERSION 1.0
@@ -78,6 +88,7 @@ qt_add_qml_module(appSecondBrain
         src/ui/MediaPreviewPanel.qml
     RESOURCES
         src/ui/assets/ASSET_MANIFEST.md
+        src/ui/assets/ella_icon_256.png
         src/ui/assets/vendor/search.svg
         src/ui/assets/vendor/file-info.svg
         src/ui/assets/vendor/notes.svg
@@ -296,6 +307,11 @@ install(TARGETS appSecondBrain
 
 if (EXISTS "${ELLA_QT_CONF}")
     install(FILES "${ELLA_QT_CONF}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+endif()
+
+if (EXISTS "${CMAKE_SOURCE_DIR}/packaging/assets/ella_icon.ico")
+    install(FILES "${CMAKE_SOURCE_DIR}/packaging/assets/ella_icon.ico"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}")
 endif()
 
 if (WIN32)

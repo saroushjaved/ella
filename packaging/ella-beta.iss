@@ -24,13 +24,14 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
 DisableProgramGroupPage=yes
-UninstallDisplayIcon={app}\appSecondBrain.exe
+SetupIconFile={#SourceDir}\ella_icon.ico
+UninstallDisplayIcon={app}\ella_icon.ico
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [Icons]
-Name: "{group}\ELLA"; Filename: "{app}\appSecondBrain.exe"
+Name: "{group}\ELLA"; Filename: "{app}\appSecondBrain.exe"; IconFilename: "{app}\ella_icon.ico"
 Name: "{group}\Uninstall ELLA"; Filename: "{uninstallexe}"
 
 [Run]
