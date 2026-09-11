@@ -16,6 +16,8 @@
 #include <QStringList>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QXmlStreamReader>
+#include <QtCore/private/qzipreader_p.h>
 
 namespace
 {
@@ -586,10 +588,101 @@ ContentExtractor::Result ContentExtractor::extract(const QString& filePath,
                                                    const QString& mimeType,
                                                    const QString& extension) const
 {
+    Result result = extractRaw(filePath, mimeType, extension);
+    if (result.passages.isEmpty() && !result.text.isEmpty()) {
+        const auto words = QRegularExpression(QStringLiteral("\\S+")).globalMatch(result.text);
+        QList<QRegularExpressionMatch> positions;
+        auto iterator = words;
+        while (iterator.hasNext()) positions.append(iterator.next());
+        for (int start = 0; start < positions.size(); start += 340) {
+            const int last = qMin(start + 399, int(positions.size()) - 1);
+            const int begin = positions[start].capturedStart();
+            const int end = positions[last].capturedEnd();
+            QVariantMap passage{{"ordinal", result.passages.size()}, {"text", result.text.mid(begin, end - begin)},
+                                {"anchorType", "text"}, {"charStart", begin}, {"charEnd", end},
+                                {"pageNumber", -1}, {"timeStartMs", -1}, {"locator", QStringLiteral("Text %1").arg(begin)}};
+            const auto timestamp = QRegularExpression(QStringLiteral("\\[(\\d+):(\\d+):(\\d+)\\]")).match(passage["text"].toString());
+            if (timestamp.hasMatch()) {
+                const qint64 ms = (timestamp.captured(1).toLongLong() * 3600 + timestamp.captured(2).toLongLong() * 60 + timestamp.captured(3).toLongLong()) * 1000;
+                passage["anchorType"] = "timestamp";
+                passage["timeStartMs"] = ms;
+                passage["locator"] = timestamp.captured(0);
+            }
+            result.passages.append(passage);
+            if (last == positions.size() - 1) break;
+        }
+    }
+    return result;
+}
+
+ContentExtractor::Result ContentExtractor::extractOfficeXml(const QString& filePath, const QString& extension) const
+{
+    Result result;
+    result.extractor = extension + QStringLiteral("-xml");
+    QZipReader archive(filePath);
+    if (!archive.isReadable() || archive.status() != QZipReader::NoError) {
+        result.error = QStringLiteral("Cannot read Office document. It may be encrypted or damaged; open the original to check.");
+        return result;
+    }
+    QStringList parts;
+    qint64 totalBytes = 0;
+    for (const auto& entry : archive.fileInfoList()) {
+        const bool selected = extension == "docx" ? entry.filePath == "word/document.xml"
+            : QRegularExpression(QStringLiteral("^ppt/slides/slide[0-9]+\\.xml$")).match(entry.filePath).hasMatch();
+        if (!selected) continue;
+        totalBytes += entry.size;
+        if (!entry.isFile || entry.isSymLink || entry.size > 16 * 1024 * 1024 || totalBytes > 64 * 1024 * 1024) {
+            result.error = QStringLiteral("Office document exceeds the safe extraction limit (64 MB of text XML).");
+            return result;
+        }
+        parts.append(entry.filePath);
+    }
+    std::sort(parts.begin(), parts.end(), [](const QString& a, const QString& b) {
+        const QRegularExpression number(QStringLiteral("slide(\\d+)\\.xml"));
+        return number.match(a).captured(1).toInt() < number.match(b).captured(1).toInt();
+    });
+    int paragraph = 0;
+    for (int partIndex = 0; partIndex < parts.size(); ++partIndex) {
+        QXmlStreamReader xml(archive.fileData(parts[partIndex]));
+        QString line;
+        QStringList lines;
+        while (!xml.atEnd()) {
+            xml.readNext();
+            if (xml.isDTD()) { result.error = "Office XML with a DTD is not supported."; return result; }
+            if (xml.isStartElement() && xml.name() == u"t") line += xml.readElementText();
+            if (xml.isStartElement() && (xml.name() == u"tab" || xml.name() == u"br")) line += ' ';
+            if (xml.isEndElement() && xml.name() == u"p" && !line.trimmed().isEmpty()) {
+                lines.append(line.trimmed()); line.clear();
+            }
+        }
+        if (xml.hasError()) { result.error = "The Office document contains malformed XML."; result.text.clear(); result.passages.clear(); return result; }
+        if (extension == "pptx") lines = {lines.join('\n')};
+        for (const QString& text : lines) {
+            if (text.trimmed().isEmpty()) continue;
+            ++paragraph;
+            const int begin = result.text.size();
+            result.text += text + "\n\n";
+            result.passages.append(QVariantMap{{"ordinal", result.passages.size()}, {"text", text},
+                {"anchorType", extension == "pptx" ? "slide" : "paragraph"},
+                {"pageNumber", extension == "pptx" ? partIndex + 1 : paragraph},
+                {"charStart", begin}, {"charEnd", begin + text.size()}, {"timeStartMs", -1},
+                {"locator", QStringLiteral("%1 %2").arg(extension == "pptx" ? "Slide" : "Paragraph").arg(extension == "pptx" ? partIndex + 1 : paragraph)}});
+        }
+    }
+    if (result.text.trimmed().isEmpty()) result.error = "No readable text found. Embedded images may require OCR or Office rendering.";
+    return result;
+}
+
+ContentExtractor::Result ContentExtractor::extractRaw(const QString& filePath,
+                                                   const QString& mimeType,
+                                                   const QString& extension) const
+{
     Result result;
 
     const QString normalizedMime = mimeType.trimmed().toLower();
     const QString normalizedExt = extension.trimmed().toLower();
+
+    if (normalizedExt == "docx" || normalizedExt == "pptx") return extractOfficeXml(filePath, normalizedExt);
 
     if (isTextLike(normalizedMime, normalizedExt)) {
         result.text = extractTextFile(filePath, &result.error);
@@ -608,12 +701,12 @@ ContentExtractor::Result ContentExtractor::extract(const QString& filePath,
             return result;
         }
 
-        result.text = extractPdfText(pdfPath, &result.error);
+        result.text = extractPdfText(pdfPath, &result.error, &result.passages);
         result.extractor = QStringLiteral("ppt-pdf");
 
         if (result.text.trimmed().isEmpty()) {
             QString ocrError;
-            const QString ocrText = extractPdfWithTesseract(pdfPath, &ocrError);
+            const QString ocrText = extractPdfWithTesseract(pdfPath, &ocrError, &result.passages);
             if (!ocrText.trimmed().isEmpty()) {
                 result.text = ocrText;
                 result.extractor = QStringLiteral("ppt-pdf-ocr");
@@ -627,12 +720,12 @@ ContentExtractor::Result ContentExtractor::extract(const QString& filePath,
     }
 
     if (normalizedMime == QStringLiteral("application/pdf") || normalizedExt == QStringLiteral("pdf")) {
-        result.text = extractPdfText(filePath, &result.error);
+        result.text = extractPdfText(filePath, &result.error, &result.passages);
         result.extractor = QStringLiteral("pdf");
 
         if (result.text.trimmed().isEmpty()) {
             QString ocrError;
-            const QString ocrText = extractPdfWithTesseract(filePath, &ocrError);
+            const QString ocrText = extractPdfWithTesseract(filePath, &ocrError, &result.passages);
             if (!ocrText.trimmed().isEmpty()) {
                 result.text = ocrText;
                 result.extractor = QStringLiteral("pdf-ocr");
@@ -822,7 +915,7 @@ QString ContentExtractor::extractTextFile(const QString& filePath, QString* erro
     return normalizeExtractedText(text);
 }
 
-QString ContentExtractor::extractPdfText(const QString& filePath, QString* error) const
+QString ContentExtractor::extractPdfText(const QString& filePath, QString* error, QVariantList* passages) const
 {
     if (error) {
         error->clear();
@@ -854,6 +947,9 @@ QString ContentExtractor::extractPdfText(const QString& filePath, QString* error
         const QString pageText = normalizeExtractedText(document.getAllText(page).text());
         if (!pageText.isEmpty()) {
             pageTexts.append(pageText);
+            if (passages) passages->append(QVariantMap{{"ordinal", passages->size()}, {"text", pageText},
+                {"anchorType", "page"}, {"pageNumber", page + 1}, {"charStart", -1}, {"charEnd", -1},
+                {"timeStartMs", -1}, {"locator", QStringLiteral("Page %1").arg(page + 1)}});
         }
     }
 
@@ -872,7 +968,7 @@ QString ContentExtractor::extractPdfText(const QString& filePath, QString* error
     return normalizeExtractedText(pageTexts.join(QStringLiteral("\n\n")));
 }
 
-QString ContentExtractor::extractPdfWithTesseract(const QString& filePath, QString* error) const
+QString ContentExtractor::extractPdfWithTesseract(const QString& filePath, QString* error, QVariantList* passages) const
 {
     if (error) {
         error->clear();
@@ -934,6 +1030,9 @@ QString ContentExtractor::extractPdfWithTesseract(const QString& filePath, QStri
         const QString pageText = extractWithTesseract(imagePath, &pageError);
         if (!pageText.trimmed().isEmpty()) {
             pageTexts.append(pageText);
+            if (passages) passages->append(QVariantMap{{"ordinal", passages->size()}, {"text", pageText},
+                {"anchorType", "page"}, {"pageNumber", page + 1}, {"charStart", -1}, {"charEnd", -1},
+                {"timeStartMs", -1}, {"locator", QStringLiteral("Page %1 (OCR)").arg(page + 1)}});
         } else if (firstError.isEmpty() && !pageError.trimmed().isEmpty()) {
             firstError = pageError;
         }

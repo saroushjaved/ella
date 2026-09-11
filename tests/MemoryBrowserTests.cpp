@@ -5,6 +5,7 @@
 #include "models/FileListModel.h"
 #include "search/ContentExtractor.h"
 #include "search/IndexingService.h"
+#include "library/LibraryService.h"
 
 #include <QDateTime>
 #include <QCoreApplication>
@@ -39,6 +40,12 @@ private slots:
     void removeFile_CleansAssociatedRows();
     void exportDiagnosticsBundle_CreatesArchive();
     void releaseMetadata_IsAvailable();
+    void sqlSearch_PhrasesPaginationFiltersAndRules();
+    void asyncSearch_DiscardsStaleQueries();
+    void incrementalIndex_UsesCurrentFileMetadata();
+    void libraryJobs_MoveIdentityDuplicateReviewAndUndo();
+    void libraryPreview_ExcludesFolders();
+    void hybridSearch_FusesRanksAndKeepsPassageAnchor();
 
 private:
     void clearTables();
@@ -131,7 +138,7 @@ void MemoryBrowserTests::search_ProvidesSnippetAndMatchReason()
         20000);
 
     model.search(QStringLiteral("laplace"));
-    QTRY_VERIFY_WITH_TIMEOUT(model.rowCount() > 0, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching() && model.rowCount() > 0, 5000);
 
     const QVariantMap first = model.get(0);
     QVERIFY(!first.value(QStringLiteral("searchMatchReason")).toString().trimmed().isEmpty());
@@ -194,7 +201,7 @@ void MemoryBrowserTests::retrievalEvents_ArePersisted()
         20000);
 
     model.search(QStringLiteral("bode"));
-    QTRY_VERIFY_WITH_TIMEOUT(model.rowCount() > 0, 5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching() && model.rowCount() > 0, 5000);
     QTRY_VERIFY_WITH_TIMEOUT(countEvents(QStringLiteral("query")) >= 1, 5000);
     QTRY_VERIFY_WITH_TIMEOUT(countEvents(QStringLiteral("time_to_first_result")) >= 1, 5000);
 
@@ -238,7 +245,7 @@ void MemoryBrowserTests::homeRecentActivity_UsesRetrievalEvents()
     QCOMPARE(importResult.value(QStringLiteral("importedCount")).toInt(), 1);
 
     model.search(QString());
-    QVERIFY(model.rowCount() > 0);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching() && model.rowCount() > 0, 5000);
     const int fileId = model.get(0).value(QStringLiteral("id")).toInt();
     QVERIFY(fileId >= 0);
 
@@ -328,8 +335,8 @@ void MemoryBrowserTests::contentExtractor_DetectsMediaAndPresentationTypes()
 
     QCOMPARE(videoResult.extractor, QStringLiteral("video-whisper"));
     QCOMPARE(audioResult.extractor, QStringLiteral("audio-whisper"));
-    QVERIFY(pptResult.extractor == QStringLiteral("ppt-pdf")
-            || pptResult.extractor == QStringLiteral("ppt-pdf-ocr"));
+    QCOMPARE(pptResult.extractor, QStringLiteral("pptx-xml"));
+    QVERIFY(!pptResult.error.isEmpty());
 }
 
 void MemoryBrowserTests::contentExtractor_RuntimeStatusHonorsEnvOverrides()
@@ -464,7 +471,7 @@ void MemoryBrowserTests::mediaTimelineAnnotations_ArePersisted()
     QCOMPARE(importResult.value(QStringLiteral("importedCount")).toInt(), 1);
 
     model.search(QString());
-    QVERIFY(model.rowCount() > 0);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching() && model.rowCount() > 0, 5000);
     const int fileId = model.get(0).value(QStringLiteral("id")).toInt();
     QVERIFY(fileId >= 0);
 
@@ -558,7 +565,7 @@ void MemoryBrowserTests::mediaTimelineAnnotations_RejectInvalidTimeValues()
     QCOMPARE(importResult.value(QStringLiteral("importedCount")).toInt(), 1);
 
     model.search(QString());
-    QVERIFY(model.rowCount() > 0);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching() && model.rowCount() > 0, 5000);
     const int fileId = model.get(0).value(QStringLiteral("id")).toInt();
     QVERIFY(fileId >= 0);
 
@@ -649,7 +656,7 @@ void MemoryBrowserTests::removeFile_CleansAssociatedRows()
     QCOMPARE(importResult.value(QStringLiteral("importedCount")).toInt(), 1);
 
     model.search(QString());
-    QVERIFY(model.rowCount() > 0);
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching() && model.rowCount() > 0, 5000);
     const int fileId = model.get(0).value(QStringLiteral("id")).toInt();
     QVERIFY(fileId >= 0);
 
@@ -716,7 +723,7 @@ void MemoryBrowserTests::releaseMetadata_IsAvailable()
     QVERIFY(!metadata.value(QStringLiteral("channel")).toString().trimmed().isEmpty());
     QVERIFY(!metadata.value(QStringLiteral("buildDateUtc")).toString().trimmed().isEmpty());
     QVERIFY(!metadata.value(QStringLiteral("buildId")).toString().trimmed().isEmpty());
-    QVERIFY(model.cloudSyncExperimental());
+    QCOMPARE(model.cloudSyncExperimental(), bool(ELLA_DEVELOPER_CLOUD_SYNC));
 }
 
 void MemoryBrowserTests::clearTables()
@@ -725,6 +732,16 @@ void MemoryBrowserTests::clearTables()
     QVERIFY(db.isOpen());
 
     const QStringList statements = {
+        QStringLiteral("DELETE FROM library_jobs"),
+        QStringLiteral("DELETE FROM watched_roots"),
+        QStringLiteral("DELETE FROM index_jobs"),
+        QStringLiteral("DELETE FROM passages"),
+        QStringLiteral("DELETE FROM passage_fts"),
+        QStringLiteral("DELETE FROM favorites"),
+        QStringLiteral("DELETE FROM file_tags"),
+        QStringLiteral("DELETE FROM saved_searches"),
+        QStringLiteral("DELETE FROM reading_positions"),
+        QStringLiteral("DELETE FROM note_links"),
         QStringLiteral("DELETE FROM retrieval_events"),
         QStringLiteral("DELETE FROM annotations"),
         QStringLiteral("DELETE FROM document_notes"),
@@ -779,5 +796,107 @@ int MemoryBrowserTests::countEvents(const QString& eventType) const
     return query.value(0).toInt();
 }
 
-QTEST_MAIN(MemoryBrowserTests)
+void MemoryBrowserTests::sqlSearch_PhrasesPaginationFiltersAndRules()
+{
+    QTemporaryDir dir;QVERIFY(dir.isValid());FileRepository repository;
+    for(int i=0;i<125;++i) {
+        const auto path=writeTextFile(dir.filePath(QStringLiteral("entry-%1.txt").arg(i,3,10,QChar('0'))),"Library");
+        QVERIFY(repository.addFile(path,"Learning","Physics",{},{},{},{},"Text",{}));
+    }
+    int count=-1;
+    auto first=repository.queryFiles({},-1,{},{},{},{},{},{},{},{},{},"name",true,100,0,&count);
+    QCOMPARE(count,125);QCOMPARE(first.size(),100);
+    const auto second=repository.queryFiles({},-1,{},{},{},{},{},{},{},{},{},"name",true,100,100,&count);
+    QCOMPARE(second.size(),25);QVERIFY(first.last().id!=second.first().id);
+    const int id=first.first().id;
+    QSqlQuery passage(DatabaseManager::instance().database());passage.prepare("INSERT INTO passages(file_id,ordinal,text,anchor_type,page_number,locator) VALUES(?,0,?,'paragraph',1,'Paragraph 1')");passage.addBindValue(id);passage.addBindValue("The quiet modern library preserves a useful source.");QVERIFY(passage.exec());
+    QSqlQuery fts(DatabaseManager::instance().database());fts.prepare("INSERT INTO passage_fts(passage_id,file_id,content_text) VALUES(?,?,?)");fts.addBindValue(passage.lastInsertId());fts.addBindValue(id);fts.addBindValue("The quiet modern library preserves a useful source.");QVERIFY(fts.exec());
+    auto matches=repository.queryFiles("\"quiet modern\"",-1,{},{},{},{},{},{},{},{},{},"name",false,100,0,&count);
+    QCOMPARE(count,1);QCOMPARE(matches.first().id,id);QVERIFY(!matches.first().searchSnippet.isEmpty());QCOMPARE(matches.first().searchAnchor.value("pageNumber").toInt(),1);
+    matches=repository.queryFiles("\"quiet library\"",-1,{},{},{},{},{},{},{},{},{},"name",false,100,0,&count);QCOMPARE(count,0);
+    LibraryService service;QVERIFY(service.setFavorite(id,true));QVERIFY(service.setTags(id,{"Research","reading"}));
+    matches=repository.queryFiles({},-1,{},{},{},{},{},{},{},{},{},"name",true,100,0,&count,true,dir.path(),"research");QCOMPARE(count,1);QCOMPARE(matches.first().id,id);
+    QVERIFY(service.saveSearch("My sources","\"quiet modern\""));QCOMPARE(service.savedSearches().size(),1);
+    QVERIFY(repository.addCollection("Physics",-1));const int collection=repository.getCollectionPickerOptions().last().toMap().value("id").toInt();
+    QVERIFY(repository.addCollectionRule(collection,"subject","exact","Physics"));
+    matches=repository.queryFiles({},collection,{},{},{},{},{},{},{},{},{},"name",true,100,0,&count);QCOMPARE(count,125);
+}
+
+void MemoryBrowserTests::asyncSearch_DiscardsStaleQueries()
+{
+    QTemporaryDir dir;FileListModel model;
+    const auto alpha=writeTextFile(dir.filePath("alpha.txt"),"first");const auto beta=writeTextFile(dir.filePath("beta.txt"),"second");
+    model.importFiles({alpha,beta});QTRY_VERIFY_WITH_TIMEOUT(!model.searching(),5000);
+    model.search("alpha");model.search("beta");
+    QTRY_VERIFY_WITH_TIMEOUT(!model.searching(),5000);QCOMPARE(model.rowCount(),1);
+    QCOMPARE(model.get(0).value("name").toString(),QStringLiteral("beta.txt"));
+    const int betaId=model.get(0).value("id").toInt();
+    model.search("alpha");QTRY_VERIFY_WITH_TIMEOUT(!model.searching(),5000);
+    QCOMPARE(model.getDetailsById(betaId).value("name").toString(),QStringLiteral("beta.txt"));
+    QCOMPARE(model.readTextFileById(betaId),QStringLiteral("second"));
+}
+
+void MemoryBrowserTests::incrementalIndex_UsesCurrentFileMetadata()
+{
+    QTemporaryDir dir;FileRepository repository;const auto path=writeTextFile(dir.filePath("fresh.txt"),"old content");
+    QVERIFY(repository.addFile(path,{},{},{},{},{},{},{},{}));
+    const auto stale=repository.queryFiles({},-1,{},{},{},{},{},{},{},{},{},"name",true).first();
+    IndexingService indexing;indexing.resume();indexing.reindexFile(stale,false);
+    QTRY_VERIFY_WITH_TIMEOUT(!indexing.status().value("running").toBool()&&indexing.status().value("queued").toInt()==0,15000);
+    QVERIFY(!writeTextFile(path,"replacement contains changedword and extra bytes").isEmpty());
+    indexing.reindexFile(stale,false); // Intentionally reuse stale catalog metadata.
+    QTRY_VERIFY_WITH_TIMEOUT(!indexing.status().value("running").toBool()&&indexing.status().value("queued").toInt()==0,15000);
+    const auto matches=repository.queryFiles("changedword",-1,{},{},{},{},{},{},{},{},{},"name",true);QCOMPARE(matches.size(),1);
+    QCOMPARE(countRows("SELECT COUNT(*) FROM passages"),1);
+    indexing.pause();QCOMPARE(indexing.status().value("paused").toBool(),true);indexing.resume();
+}
+
+void MemoryBrowserTests::libraryJobs_MoveIdentityDuplicateReviewAndUndo()
+{
+    QTemporaryDir dir;const QString original=writeTextFile(dir.filePath("original.md"),"unique source passage");LibraryService service;
+    service.startImport({dir.path()},{},true);QTRY_VERIFY_WITH_TIMEOUT(!service.activity().value("running").toBool(),15000);
+    FileRepository repository;const int id=repository.getFileDetailsByPath(original).value("id").toInt();QVERIFY(id>0);
+    QVERIFY(service.setFavorite(id,true));QVERIFY(service.saveReadingPosition(id,{{"charStart",12}}));
+    const QString moved=dir.filePath("renamed.md");QVERIFY(QFile::rename(original,moved));
+    service.scanNow();QTRY_VERIFY_WITH_TIMEOUT(!service.activity().value("running").toBool(),15000);
+    QCOMPARE(repository.getFileDetailsByPath(moved).value("id").toInt(),id);QVERIFY(service.isFavorite(id));
+    QCOMPARE(service.readingPosition(id).value("charStart").toInt(),12);
+    QVERIFY(service.removeFile(id));QVERIFY(QFileInfo::exists(moved));
+    QCOMPARE(repository.queryFiles({},-1,{},{},{},{},{},{},{},{},{},"name",true).size(),0);
+    QVERIFY(service.undoRemoval());QCOMPARE(repository.queryFiles({},-1,{},{},{},{},{},{},{},{},{},"name",true).size(),1);
+    QVERIFY(QFile::copy(moved,dir.filePath("duplicate.md")));service.scanNow();QTRY_VERIFY_WITH_TIMEOUT(!service.activity().value("running").toBool(),15000);
+    QCOMPARE(service.duplicates().size(),2);
+}
+
+void MemoryBrowserTests::libraryPreview_ExcludesFolders()
+{
+    QTemporaryDir dir;writeTextFile(dir.filePath("keep.txt"),"keep");writeTextFile(dir.filePath("private/skip.txt"),"private");writeTextFile(dir.filePath("node_modules/skip.txt"),"node");writeTextFile(dir.filePath("binary.exe"),"binary");
+    LibraryService service;QSignalSpy ready(&service,&LibraryService::previewReady);service.previewImport({dir.path()},{"private"});
+    QTRY_COMPARE_WITH_TIMEOUT(ready.size(),1,5000);const auto preview=ready.first().first().toMap();QCOMPARE(preview.value("supportedFiles").toInt(),1);QVERIFY(preview.value("unsupportedFiles").toInt()>=3);
+    service.startImport({dir.path()},{"private"},true);service.pause();QCOMPARE(service.activity().value("status").toString(),QStringLiteral("paused"));
+    QCOMPARE(countRows("SELECT COUNT(*) FROM library_jobs WHERE status='paused'"),1);service.resume();
+    QTRY_VERIFY_WITH_TIMEOUT(!service.activity().value("running").toBool(),15000);QCOMPARE(countRows("SELECT COUNT(*) FROM files"),1);
+}
+
+void MemoryBrowserTests::hybridSearch_FusesRanksAndKeepsPassageAnchor()
+{
+    QTemporaryDir dir; QVERIFY(dir.isValid()); FileRepository repository;
+    const QString keywordPath=writeTextFile(dir.filePath("keyword.txt"),"needle exact wording");
+    const QString meaningPath=writeTextFile(dir.filePath("meaning.txt"),"a paraphrased explanation");
+    QVERIFY(repository.addFile(keywordPath,{},{},{},{},{},{},{},{}));
+    QVERIFY(repository.addFile(meaningPath,{},{},{},{},{},{},{},{}));
+    const int keywordId=repository.getFileDetailsByPath(keywordPath).value("id").toInt();
+    const int meaningId=repository.getFileDetailsByPath(meaningPath).value("id").toInt();
+    QSqlQuery passage(DatabaseManager::instance().database());passage.prepare("INSERT INTO passages(file_id,ordinal,text,anchor_type,locator) VALUES(?,0,?,'text','Text 0')");passage.addBindValue(keywordId);passage.addBindValue("needle exact wording");QVERIFY(passage.exec());
+    QSqlQuery fts(DatabaseManager::instance().database());fts.prepare("INSERT INTO passage_fts(passage_id,file_id,content_text) VALUES(?,?,?)");fts.addBindValue(passage.lastInsertId());fts.addBindValue(keywordId);fts.addBindValue("needle exact wording");QVERIFY(fts.exec());
+    FileListModel model;model.search("needle");QTRY_VERIFY_WITH_TIMEOUT(!model.searching(),5000);QCOMPARE(model.rowCount(),1);
+    const QVariantMap meaning{{"fileId",meaningId},{"text","Equivalent concept in different words"},{"locator","Paragraph 3"},{"passageOrdinal",2},{"anchorType","paragraph"}};
+    const QVariantMap both{{"fileId",keywordId},{"text","Needle with semantic evidence"},{"locator","Paragraph 1"},{"passageOrdinal",0},{"anchorType","paragraph"}};
+    model.applySemanticResults("needle",{meaning,both});QCOMPARE(model.rowCount(),2);QCOMPARE(model.get(0).value("id").toInt(),keywordId);
+    const int meaningIndex=model.indexOfFileId(meaningId);QVERIFY(meaningIndex>=0);
+    const auto item=model.get(meaningIndex);QVERIFY(item.value("searchMatchReason").toString().contains("Meaning"));
+    QCOMPARE(item.value("searchAnchor").toMap().value("passageOrdinal").toInt(),2);
+}
+
+QTEST_GUILESS_MAIN(MemoryBrowserTests)
 #include "MemoryBrowserTests.moc"

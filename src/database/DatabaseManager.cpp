@@ -29,47 +29,11 @@ bool DatabaseManager::initialize()
         QSqlDatabase::removeDatabase(m_connectionName);
     }
 
-    if (!openConnection()) {
-        if (!recoverCorruptDatabase(QStringLiteral("open_failed")) || !openConnection()) {
-            if (m_lastError.isEmpty()) {
-                m_lastError = QStringLiteral("Failed to open database");
-            }
-            qCritical() << "DB open failed:" << m_lastError;
-            return false;
-        }
-    }
-
-    if (!createTables()) {
-        m_lastError = QStringLiteral("Failed to create or migrate database tables");
-        qCritical() << m_lastError;
+    if (!openConnection() || !validateIntegrity() || !migrate() || !pruneCorruptedIndexRows()) {
+        qCritical() << "Library could not be opened. Existing data has been preserved:" << m_lastError;
         closeConnection();
-        if (!recoverCorruptDatabase(QStringLiteral("schema_migration_failed")) || !openConnection()
-            || !createTables()) {
-            if (m_lastError.isEmpty()) {
-                m_lastError = QStringLiteral("Database recovery failed after schema migration error");
-            }
-            qCritical() << m_lastError;
-            return false;
-        }
+        return false;
     }
-
-    if (!validateIntegrity()) {
-        qCritical() << "Database integrity check failed:" << m_lastError;
-        closeConnection();
-        if (!recoverCorruptDatabase(QStringLiteral("integrity_check_failed")) || !openConnection()
-            || !createTables() || !validateIntegrity()) {
-            if (m_lastError.isEmpty()) {
-                m_lastError = QStringLiteral("Database recovery failed after integrity check error");
-            }
-            qCritical() << m_lastError;
-            return false;
-        }
-    }
-
-    if (!pruneCorruptedIndexRows()) {
-        qWarning() << "Index state cleanup failed during startup:" << m_lastError;
-    }
-
     return true;
 }
 
@@ -87,12 +51,16 @@ bool DatabaseManager::openConnection()
 {
     QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connectionName);
     db.setDatabaseName(AppConfig::databasePath());
+    db.setConnectOptions(QStringLiteral("QSQLITE_BUSY_TIMEOUT=10000"));
 
     if (!db.open()) {
         m_lastError = db.lastError().text();
         return false;
     }
 
+    QSqlQuery config(db);
+    config.exec(QStringLiteral("PRAGMA foreign_keys=ON"));
+    config.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
     return true;
 }
 
@@ -144,41 +112,11 @@ bool DatabaseManager::pruneCorruptedIndexRows()
     const bool ok =
         exec(QStringLiteral("DELETE FROM file_index_state WHERE file_id NOT IN (SELECT id FROM files)")) &&
         exec(QStringLiteral("DELETE FROM file_content_fts WHERE file_id NOT IN (SELECT id FROM files)")) &&
+        exec(QStringLiteral("DELETE FROM passage_fts WHERE file_id NOT IN (SELECT id FROM files)")) &&
         exec(QStringLiteral("DELETE FROM annotations WHERE file_id NOT IN (SELECT id FROM files)")) &&
         exec(QStringLiteral("DELETE FROM document_notes WHERE file_id NOT IN (SELECT id FROM files)"));
 
     return ok;
-}
-
-bool DatabaseManager::recoverCorruptDatabase(const QString& reason)
-{
-    closeConnection();
-
-    const QString dbPath = AppConfig::databasePath();
-    QFileInfo info(dbPath);
-    if (!info.exists()) {
-        return true;
-    }
-
-    const QString timestamp = QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmss"));
-    const QString backupPath = QStringLiteral("%1.corrupt-%2-%3")
-                                   .arg(dbPath, reason, timestamp);
-
-    if (QFile::exists(backupPath)) {
-        QFile::remove(backupPath);
-    }
-
-    if (!QFile::rename(dbPath, backupPath)) {
-        if (!QFile::copy(dbPath, backupPath)) {
-            m_lastError = QStringLiteral("Failed to backup corrupted database file");
-            return false;
-        }
-        QFile::remove(dbPath);
-    }
-
-    qWarning() << "Database recovered by moving previous file to:" << backupPath
-               << "| Rebuild search index is recommended.";
-    return true;
 }
 
 bool DatabaseManager::createTables()
@@ -204,7 +142,9 @@ bool DatabaseManager::createTables()
             source TEXT,
             author TEXT,
             document_type TEXT,
-            remarks TEXT
+            remarks TEXT,
+            content_hash TEXT,
+            removed_at TEXT
         )
     )";
 
@@ -240,6 +180,8 @@ bool DatabaseManager::createTables()
     if (!ensureTableColumn("files", "author", "TEXT")) return false;
     if (!ensureTableColumn("files", "document_type", "TEXT")) return false;
     if (!ensureTableColumn("files", "remarks", "TEXT")) return false;
+    if (!ensureTableColumn("files", "content_hash", "TEXT")) return false;
+    if (!ensureTableColumn("files", "removed_at", "TEXT")) return false;
 
     const QString createCollectionsTable = R"(
         CREATE TABLE IF NOT EXISTS collections (
@@ -470,5 +412,73 @@ bool DatabaseManager::createTables()
         return false;
     }
 
+    return true;
+}
+
+bool DatabaseManager::migrate()
+{
+    QSqlDatabase db = database();
+    QSqlQuery version(db);
+    if (!version.exec(QStringLiteral("PRAGMA user_version")) || !version.next()) {
+        m_lastError = version.lastError().text();
+        return false;
+    }
+    const int current = version.value(0).toInt();
+    version.finish();
+    constexpr int supported = 2;
+    if (current > supported) {
+        m_lastError = QStringLiteral("This library was created by a newer ELLA. Install that version to open it.");
+        return false;
+    }
+    if (current == supported) return true;
+    // VACUUM INTO creates a consistent snapshot including WAL pages. Never move,
+    // replace or reset the source database when a migration fails.
+    if (db.tables().contains(QStringLiteral("files"))) {
+        const QString backup = AppConfig::databasePath() + QStringLiteral(".before-v2-")
+            + QDateTime::currentDateTimeUtc().toString(QStringLiteral("yyyyMMdd-HHmmsszzz")) + QStringLiteral(".sqlite");
+        QSqlQuery copy(db);
+        copy.prepare(QStringLiteral("VACUUM INTO ?"));
+        copy.addBindValue(backup);
+        if (!copy.exec()) {
+            m_lastError = QStringLiteral("Migration backup failed: %1").arg(copy.lastError().text());
+            return false;
+        }
+    }
+    if (!db.transaction()) { m_lastError = db.lastError().text(); return false; }
+    if (!createTables()) {
+        db.rollback();
+        m_lastError = QStringLiteral("Schema migration failed; the original library and pre-migration backup are preserved.");
+        return false;
+    }
+    const QStringList changes = {
+        QStringLiteral("CREATE TABLE IF NOT EXISTS watched_roots(id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE, exclusions_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, last_scan_at TEXT, last_error TEXT)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS library_jobs(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TEXT NOT NULL)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS index_jobs(file_id INTEGER PRIMARY KEY, force INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'queued', last_error TEXT)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS passages(id INTEGER PRIMARY KEY, file_id INTEGER NOT NULL, ordinal INTEGER NOT NULL, text TEXT NOT NULL, anchor_type TEXT NOT NULL DEFAULT 'text', page_number INTEGER, char_start INTEGER, char_end INTEGER, time_start_ms INTEGER, locator TEXT, UNIQUE(file_id,ordinal))"),
+        QStringLiteral("CREATE VIRTUAL TABLE IF NOT EXISTS passage_fts USING fts5(passage_id UNINDEXED,file_id UNINDEXED,content_text)"),
+        QStringLiteral("DELETE FROM passage_fts"),
+        QStringLiteral("INSERT INTO passage_fts(passage_id,file_id,content_text) SELECT id,file_id,text FROM passages"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_passages_file ON passages(file_id,ordinal)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS favorites(file_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS file_tags(file_id INTEGER NOT NULL, tag TEXT NOT NULL COLLATE NOCASE, PRIMARY KEY(file_id,tag))"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag,file_id)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS saved_searches(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, query_text TEXT NOT NULL, filters_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS reading_positions(file_id INTEGER PRIMARY KEY, anchor_json TEXT NOT NULL, opened_at TEXT NOT NULL)"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS note_links(note_file_id INTEGER NOT NULL, source_file_id INTEGER NOT NULL, anchor_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(note_file_id,source_file_id,anchor_json))"),
+        QStringLiteral("CREATE TABLE IF NOT EXISTS embedding_versions(model_id TEXT PRIMARY KEY, model_sha256 TEXT NOT NULL, dimension INTEGER NOT NULL, chunk_tokens INTEGER NOT NULL DEFAULT 400, overlap_tokens INTEGER NOT NULL DEFAULT 60, indexed_at TEXT)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_files_active_sort ON files(removed_at,indexed_at DESC,id)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_files_extension ON files(extension)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_file_collections_collection ON file_collections(collection_id,file_id)"),
+        QStringLiteral("PRAGMA user_version=2")
+    };
+    for (const QString& statement : changes) {
+        QSqlQuery query(db);
+        if (!query.exec(statement)) {
+            m_lastError = QStringLiteral("Migration failed: %1. Original data preserved.").arg(query.lastError().text());
+            db.rollback(); return false;
+        }
+    }
+    if (!db.commit()) { m_lastError = db.lastError().text(); db.rollback(); return false; }
     return true;
 }

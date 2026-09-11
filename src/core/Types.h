@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QDateTime>
+#include <QVariantMap>
 
 enum class FileStatus
 {
@@ -38,4 +39,5 @@ struct FileRecord
     QString searchSnippet;
     QString searchMatchReason;
     double searchScore = 0.0;
+    QVariantMap searchAnchor;
 };

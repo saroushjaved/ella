@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "qtVersion": "6.11.1",
+  "compiler": "mingw1310_64",
+  "application": "appSecondBrain.exe",
+  "files": [
+    { "source": "packaging/qt.conf", "destination": "qt.conf" },
+    { "source": "packaging/assets/ella_icon.ico", "destination": "ella_icon.ico" },
+    { "source": "LICENSE", "destination": "LICENSE.txt" },
+    { "source": "docs/THIRD-PARTY-NOTICES.md", "destination": "THIRD-PARTY-NOTICES.md" }
+  ],
+  "required": [ "appSecondBrain.exe", "Qt6Core.dll", "Qt6Gui.dll", "Qt6Network.dll", "Qt6Qml.dll", "Qt6Quick.dll", "Qt6QuickControls2.dll", "Qt6Sql.dll", "Qt6Pdf.dll", "Qt6PdfQuick.dll", "platforms/qwindows.dll", "sqldrivers/qsqlite.dll", "qml/QtQuick/Pdf/pdfquickplugin.dll", "qt.conf" ],
+  "forbiddenPatterns": [ "(^|/)tools/", "(^|/)tests?/", "(^|/)smoke_appdata/", "(^|/)translations/", "(^|/)QtMultimedia/", "(^|/)multimedia/", "Qt6Multimedia", "ffmpeg", "avcodec", "avformat", "swscale", "\\.debug$", "\\.pdb$", "\\.obj$", "\\.a$", "\\.lib$", "\\.log$" ],
+  "sizeLimits": { "installerTargetBytes": 100000000, "installerMaximumBytes": 150000000, "installedMaximumBytes": 300000000, "growthWarningPercent": 5 }
+}

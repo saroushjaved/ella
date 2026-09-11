@@ -12,6 +12,10 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QtGlobal>
+#include <QTimer>
+#include <QThreadPool>
+#include <atomic>
+#include <memory>
 
 class IndexingService;
 class CloudSyncService;
@@ -20,6 +24,9 @@ class FileListModel : public QAbstractListModel
 {
     Q_OBJECT
     Q_PROPERTY(bool cloudSyncExperimental READ cloudSyncExperimental CONSTANT)
+    Q_PROPERTY(bool searching READ searching NOTIFY searchStateChanged)
+    Q_PROPERTY(bool hasMore READ hasMore NOTIFY searchStateChanged)
+    Q_PROPERTY(int totalCount READ totalCount NOTIFY searchStateChanged)
 
 public:
     enum FileRoles {
@@ -35,7 +42,8 @@ public:
         DocumentTypeRole,
         SearchSnippetRole,
         SearchMatchReasonRole,
-        SearchScoreRole
+        SearchScoreRole,
+        SearchAnchorRole
     };
 
     explicit FileListModel(QObject* parent = nullptr);
@@ -50,6 +58,20 @@ public:
     Q_INVOKABLE void reload();
     Q_INVOKABLE void refreshCurrentView();
     Q_INVOKABLE void search(const QString& text);
+    bool searching() const { return m_searching; }
+    bool hasMore() const { return m_files.size() < m_totalCount; }
+    int totalCount() const { return m_totalCount; }
+    Q_INVOKABLE void loadMore();
+    Q_INVOKABLE void applySemanticResults(const QString& query, const QVariantList& results);
+    Q_INVOKABLE void setLibraryFilters(bool favoritesOnly, const QString& folder, const QString& tag);
+    Q_INVOKABLE bool openFileById(int fileId) const;
+    Q_INVOKABLE bool openContainingFolderById(int fileId) const;
+    Q_INVOKABLE QString fileUrlById(int fileId) const;
+    Q_INVOKABLE QString readTextFileById(int fileId) const;
+    Q_INVOKABLE QVariantMap presentationPdfPreviewById(int fileId) const;
+    Q_INVOKABLE bool assignCollectionById(int fileId, int collectionId);
+    Q_INVOKABLE bool removeFileFromCollectionById(int fileId, int collectionId);
+    Q_INVOKABLE bool relinkFileById(int fileId, const QString& path);
 
     Q_INVOKABLE void setAdvancedFilters(int statusValue,
                                         const QString& extension,
@@ -183,9 +205,12 @@ public:
 
 signals:
     void indexStatusChanged();
+    void searchStateChanged();
 
 private:
     void refreshFiles();
+    void requestSearchPage(bool append);
+    void fuseSemanticResults();
     QList<FileRecord> allFilesForBackgroundJobs() const;
     bool findFileRecordById(int fileId, FileRecord* outFile) const;
     void notifyFileChanged(int fileId, bool forceReindex, bool syncCatalog);
@@ -205,6 +230,9 @@ private:
     CloudSyncService* m_cloudSyncService = nullptr;
 
     QString m_searchText;
+    QString m_semanticQuery;
+    QVariantList m_semanticResults;
+    int m_keywordLoadedCount = 0;
     int m_currentCollectionId = -1;
 
     QString m_currentTechnicalDomain;
@@ -225,4 +253,13 @@ private:
     QString m_lastTrackedQuery;
     QString m_pendingTtfrQuery;
     QElapsedTimer m_queryTimer;
+    QTimer m_searchDebounce;
+    QThreadPool m_searchPool;
+    std::shared_ptr<std::atomic<quint64>> m_searchToken=std::make_shared<std::atomic<quint64>>(0);
+    quint64 m_searchGeneration = 0;
+    bool m_searching = false;
+    int m_totalCount = 0;
+    bool m_favoritesOnly = false;
+    QString m_folderFilter;
+    QString m_tagFilter;
 };

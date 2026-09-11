@@ -10,7 +10,10 @@ TextField {
     color: tokens.textPrimary
     font.family: tokens.fontFamily
     font.pixelSize: 15
-    placeholderTextColor: "#758398"
+    placeholderTextColor: tokens.textMuted
+    Accessible.name: placeholderText
+    leftPadding: 14
+    rightPadding: 14
     selectionColor: tokens.accentSoft
     selectedTextColor: tokens.textPrimary
 
@@ -26,7 +29,7 @@ TextField {
                 return tokens.borderSoft
             return tokens.border
         }
-        border.width: 1
+        border.width: field.activeFocus ? 2 : 1
         opacity: field.enabled ? 1.0 : 0.75
     }
 }

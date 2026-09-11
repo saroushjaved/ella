@@ -18,6 +18,9 @@ public:
     void scheduleIncremental(const QList<FileRecord>& files);
     void reindexFile(const FileRecord& file, bool force);
     void rebuildIndex(const QList<FileRecord>& files);
+    Q_INVOKABLE void pause();
+    Q_INVOKABLE void resume();
+    Q_INVOKABLE void cancel();
 
     QVariantMap status() const;
     int indexedCount() const;
@@ -38,6 +41,7 @@ private:
     QQueue<QueueItem> m_queue;
     QSet<int> m_queuedFileIds;
     bool m_running = false;
+    bool m_paused = false;
     int m_total = 0;
     int m_processed = 0;
     int m_failed = 0;
@@ -45,4 +49,3 @@ private:
     QString m_lastError;
     QString m_lastIndexedAt;
 };
-

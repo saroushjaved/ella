@@ -27,6 +27,9 @@
 #include <QUrl>
 #include <QSet>
 #include <algorithm>
+#include <QtConcurrent>
+#include <QFutureWatcher>
+#include <QUuid>
 
 namespace
 {
@@ -156,6 +159,10 @@ FileListModel::FileListModel(QObject* parent)
     m_importStatus[QStringLiteral("lastImportedAt")] = QString();
     m_importStatus[QStringLiteral("lastMessage")] = QStringLiteral("No imports yet");
 
+    m_searchPool.setMaxThreadCount(1);
+    m_searchDebounce.setSingleShot(true);
+    m_searchDebounce.setInterval(200);
+    connect(&m_searchDebounce, &QTimer::timeout, this, [this] { requestSearchPage(false); });
     reload();
 }
 
@@ -231,6 +238,8 @@ QVariant FileListModel::data(const QModelIndex& index, int role) const
         return file.searchMatchReason;
     case SearchScoreRole:
         return file.searchScore;
+    case SearchAnchorRole:
+        return file.searchAnchor;
     default:
         return {};
     }
@@ -251,31 +260,93 @@ QHash<int, QByteArray> FileListModel::roleNames() const
         { DocumentTypeRole, "documentType" },
         { SearchSnippetRole, "searchSnippet" },
         { SearchMatchReasonRole, "searchMatchReason" },
-        { SearchScoreRole, "searchScore" }
+        { SearchScoreRole, "searchScore" },
+        { SearchAnchorRole, "searchAnchor" }
     };
 }
 
 void FileListModel::refreshFiles()
 {
-    beginResetModel();
-    m_files = m_repository.queryFiles(
-        m_searchText,
-        m_currentCollectionId,
-        m_currentTechnicalDomain,
-        m_currentSubject,
-        m_currentSubtopic,
-        m_statusFilters,
-        m_extensionFilters,
-        m_documentTypeFilters,
-        m_dateFieldFilter,
-        m_dateFromFilter,
-        m_dateToFilter,
-        m_sortField,
-        m_sortAscending
-        );
-    endResetModel();
+    m_searchDebounce.stop();
+    requestSearchPage(false);
 }
 
+void FileListModel::loadMore()
+{
+    if (!m_searching && hasMore()) requestSearchPage(true);
+}
+
+void FileListModel::setLibraryFilters(bool favoritesOnly, const QString& folder, const QString& tag)
+{
+    m_favoritesOnly = favoritesOnly; m_folderFilter = folder; m_tagFilter = tag;
+    refreshFiles();
+}
+
+bool FileListModel::assignCollectionById(int fileId,int collectionId)
+{ const bool ok=m_repository.assignFileToCollection(fileId,collectionId);if(ok)refreshFiles();return ok; }
+bool FileListModel::removeFileFromCollectionById(int fileId,int collectionId)
+{ const bool ok=m_repository.removeFileFromCollection(fileId,collectionId);if(ok)refreshFiles();return ok; }
+bool FileListModel::relinkFileById(int fileId,const QString& path)
+{ const bool ok=m_repository.relinkFile(fileId,path);if(ok){refreshFiles();notifyFileChanged(fileId,true,true);}return ok; }
+
+void FileListModel::requestSearchPage(bool append)
+{
+    const quint64 generation = ++m_searchGeneration;
+    m_searchToken->store(generation);
+    const auto token=m_searchToken;
+    const int offset = append ? m_keywordLoadedCount : 0;
+    const QString searchText=m_searchText, domain=m_currentTechnicalDomain, subject=m_currentSubject,
+        subtopic=m_currentSubtopic, dateField=m_dateFieldFilter, dateFrom=m_dateFromFilter,
+        dateTo=m_dateToFilter, sortField=m_sortField, folder=m_folderFilter, tag=m_tagFilter;
+    const QStringList statuses=m_statusFilters, extensions=m_extensionFilters, types=m_documentTypeFilters;
+    const int collection=m_currentCollectionId;
+    const bool ascending=m_sortAscending, favorites=m_favoritesOnly;
+    using SearchPage = QPair<QList<FileRecord>,int>;
+    auto* watcher = new QFutureWatcher<SearchPage>(this);
+    m_searching=true; emit searchStateChanged();
+    connect(watcher,&QFutureWatcher<SearchPage>::finished,this,[this,watcher,generation,append] {
+        const auto page=watcher->result(); watcher->deleteLater();
+        if(generation!=m_searchGeneration) return;
+        if(append && !page.first.isEmpty()) {
+            beginResetModel();
+            for (const auto& file : page.first) {
+                bool exists=false; for (const auto& current : m_files) if (current.id==file.id) { exists=true; break; }
+                if (!exists) m_files.append(file);
+            }
+            m_keywordLoadedCount += page.first.size();
+            endResetModel();
+        } else if(!append) { beginResetModel(); m_files=page.first; m_keywordLoadedCount=page.first.size(); endResetModel(); }
+        m_totalCount=page.second; m_searching=false;
+        if (m_semanticQuery == m_searchText && !m_semanticResults.isEmpty()) fuseSemanticResults();
+        if(!m_searchText.trimmed().isEmpty() && m_searchText.trimmed()!=m_lastTrackedQuery) {
+            m_lastTrackedQuery=m_searchText.trimmed();
+            trackRetrievalEventInternal("query",m_lastTrackedQuery,-1,-1,{},"{\"surface\":\"browser\"}");
+        }
+        if(!m_pendingTtfrQuery.isEmpty() && !m_files.isEmpty()) {
+            trackRetrievalEventInternal("time_to_first_result",m_pendingTtfrQuery,m_files.first().id,
+                m_queryTimer.isValid()?static_cast<int>(m_queryTimer.elapsed()):-1,{},{});
+            m_pendingTtfrQuery.clear();
+        }
+        emit searchStateChanged();
+    });
+    watcher->setFuture(QtConcurrent::run(&m_searchPool,[=] {
+        if(token->load()!=generation)return SearchPage();
+        const QString connection="search_"+QUuid::createUuid().toString(QUuid::Id128);
+        SearchPage page;
+        {
+            auto db=QSqlDatabase::addDatabase("QSQLITE",connection);
+            db.setDatabaseName(AppConfig::databasePath()); db.setConnectOptions("QSQLITE_BUSY_TIMEOUT=10000");
+            if(db.open()) {
+                QSqlQuery config(db); config.exec("PRAGMA query_only=ON");
+                FileRepository repository(connection);
+                page.first=repository.queryFiles(searchText,collection,domain,subject,subtopic,statuses,
+                    extensions,types,dateField,dateFrom,dateTo,sortField,ascending,100,offset,&page.second,favorites,folder,tag);
+            }
+            db.close();
+        }
+        QSqlDatabase::removeDatabase(connection); return page;
+    }));
+}
 void FileListModel::reload()
 {
     m_searchText.clear();
@@ -312,43 +383,72 @@ void FileListModel::refreshCurrentView()
 
 void FileListModel::search(const QString& text)
 {
+    if (m_searchText == text) return;
     m_searchText = text;
-    const QString trimmedQuery = text.trimmed();
-
-    if (trimmedQuery.isEmpty()) {
-        m_pendingTtfrQuery.clear();
-        m_queryTimer.invalidate();
-    } else if (trimmedQuery != m_lastTrackedQuery) {
-        m_lastTrackedQuery = trimmedQuery;
-        m_pendingTtfrQuery = trimmedQuery;
-        m_queryTimer.start();
-        trackRetrievalEventInternal(
-            QStringLiteral("query"),
-            trimmedQuery,
-            -1,
-            -1,
-            QString(),
-            QStringLiteral("{\"surface\":\"browser\"}"));
-    }
-
-    refreshFiles();
-
-    if (!m_pendingTtfrQuery.isEmpty() && !m_files.isEmpty()) {
-        const int firstFileId = m_files.first().id;
-        const int latencyMs = m_queryTimer.isValid() ? static_cast<int>(m_queryTimer.elapsed()) : -1;
-        const QString metadata = QStringLiteral("{\"surface\":\"browser\",\"resultCount\":%1}")
-                                     .arg(m_files.count());
-        trackRetrievalEventInternal(
-            QStringLiteral("time_to_first_result"),
-            m_pendingTtfrQuery,
-            firstFileId,
-            latencyMs,
-            QString(),
-            metadata);
-        m_pendingTtfrQuery.clear();
-    }
+    m_semanticQuery.clear();
+    m_semanticResults.clear();
+    ++m_searchGeneration; // Pending worker results become stale immediately, even during debounce.
+    m_searchToken->store(m_searchGeneration);
+    m_pendingTtfrQuery=text.trimmed();
+    m_queryTimer.start();
+    m_searching=true; emit searchStateChanged();
+    m_searchDebounce.start();
 }
 
+void FileListModel::applySemanticResults(const QString& query, const QVariantList& results)
+{
+    if (query.trimmed() != m_searchText.trimmed()) return;
+    m_semanticQuery = query.trimmed();
+    m_semanticResults = results;
+    if (!m_searching) fuseSemanticResults();
+}
+
+void FileListModel::fuseSemanticResults()
+{
+    if (m_semanticQuery != m_searchText.trimmed() || m_semanticResults.isEmpty()) return;
+    QHash<int, int> keywordRanks;
+    for (int i=0; i<m_files.size(); ++i) keywordRanks.insert(m_files.at(i).id, i + 1);
+    QHash<int, int> semanticRanks;
+    QHash<int, QVariantMap> evidence;
+    int semanticRank=0;
+    for (const QVariant& value : m_semanticResults) {
+        const QVariantMap match=value.toMap(); const int id=match.contains(QStringLiteral("fileId")) ? match.value(QStringLiteral("fileId")).toInt() : -1;
+        if (id<0 || semanticRanks.contains(id)) continue;
+        semanticRanks.insert(id, ++semanticRank); evidence.insert(id, match);
+    }
+    const bool filtersActive=m_currentCollectionId>=0 || m_favoritesOnly || !m_folderFilter.isEmpty() || !m_tagFilter.isEmpty()
+        || !m_currentTechnicalDomain.isEmpty() || !m_currentSubject.isEmpty() || !m_currentSubtopic.isEmpty()
+        || !m_statusFilters.isEmpty() || !m_extensionFilters.isEmpty() || !m_documentTypeFilters.isEmpty()
+        || !m_dateFromFilter.isEmpty() || !m_dateToFilter.isEmpty();
+    QList<FileRecord> fused=m_files;
+    if (!filtersActive) {
+        for (auto it=semanticRanks.cbegin(); it!=semanticRanks.cend(); ++it) {
+            if (keywordRanks.contains(it.key())) continue;
+            FileRecord file; if (m_repository.fileById(it.key(), &file)) fused.append(file);
+        }
+    }
+    for (FileRecord& file : fused) {
+        const int keywordRank=keywordRanks.value(file.id,0), meaningRank=semanticRanks.value(file.id,0);
+        file.searchScore=(keywordRank ? 1.0/(60.0+keywordRank) : 0.0) + (meaningRank ? 1.0/(60.0+meaningRank) : 0.0);
+        if (meaningRank) {
+            const QVariantMap match=evidence.value(file.id); const QString passage=match.value(QStringLiteral("text")).toString().trimmed();
+            if (!passage.isEmpty()) file.searchSnippet=passage.left(900);
+            file.searchAnchor=match.value(QStringLiteral("anchor")).toMap();
+            if (file.searchAnchor.isEmpty()) {
+                file.searchAnchor={{QStringLiteral("anchorType"),match.value(QStringLiteral("anchorType"))},
+                    {QStringLiteral("pageNumber"),match.value(QStringLiteral("pageNumber"))},
+                    {QStringLiteral("passageOrdinal"),match.value(QStringLiteral("passageOrdinal"))},
+                    {QStringLiteral("locator"),match.value(QStringLiteral("locator"))},
+                    {QStringLiteral("quote"),passage.left(500)}};
+            }
+            const QString locator=match.value(QStringLiteral("locator")).toString();
+            file.searchMatchReason=(keywordRank ? QStringLiteral("Words and meaning match") : QStringLiteral("Meaning match"))
+                + (locator.isEmpty() ? QString() : QStringLiteral(" · ")+locator);
+        }
+    }
+    std::stable_sort(fused.begin(),fused.end(),[](const FileRecord& a,const FileRecord& b){return a.searchScore>b.searchScore;});
+    beginResetModel(); m_files=fused; endResetModel(); m_totalCount=qMax(m_totalCount,m_files.size()); emit searchStateChanged();
+}
 void FileListModel::setAdvancedFilters(int statusValue,
                                        const QString& extension,
                                        const QString& documentType,
@@ -810,6 +910,7 @@ QVariantMap FileListModel::get(int index) const
     map["searchSnippet"] = file.searchSnippet;
     map["searchMatchReason"] = file.searchMatchReason;
     map["searchScore"] = file.searchScore;
+    map["searchAnchor"] = file.searchAnchor;
 
     return map;
 }
@@ -824,6 +925,7 @@ QVariantMap FileListModel::getDetails(int index) const
     details[QStringLiteral("searchSnippet")] = m_files.at(index).searchSnippet;
     details[QStringLiteral("searchMatchReason")] = m_files.at(index).searchMatchReason;
     details[QStringLiteral("searchScore")] = m_files.at(index).searchScore;
+    details[QStringLiteral("searchAnchor")] = m_files.at(index).searchAnchor;
     return details;
 }
 
@@ -841,6 +943,7 @@ QVariantMap FileListModel::getDetailsById(int fileId) const
             details[QStringLiteral("searchSnippet")] = file.searchSnippet;
             details[QStringLiteral("searchMatchReason")] = file.searchMatchReason;
             details[QStringLiteral("searchScore")] = file.searchScore;
+            details[QStringLiteral("searchAnchor")] = file.searchAnchor;
             break;
         }
     }
@@ -1094,6 +1197,55 @@ bool FileListModel::openFile(int fileIndex) const
     }
 
     return opened;
+}
+
+bool FileListModel::openFileById(int fileId) const
+{
+    const QString path=m_repository.getFileDetails(fileId).value("path").toString();
+    if(path.isEmpty() || !QFileInfo(path).isFile()) return false;
+    const bool opened=QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    if(opened) trackRetrievalEventInternal("opened_source",m_searchText,fileId,-1,{},{});
+    return opened;
+}
+
+bool FileListModel::openContainingFolderById(int fileId) const
+{
+    const QString path=m_repository.getFileDetails(fileId).value("path").toString();
+    return !path.isEmpty() && QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+}
+
+QString FileListModel::fileUrlById(int fileId) const
+{
+    const QString path=m_repository.getFileDetails(fileId).value("path").toString();
+    return path.isEmpty()?QString():QUrl::fromLocalFile(path).toString();
+}
+
+QString FileListModel::readTextFileById(int fileId) const
+{
+    const QVariantMap details=m_repository.getFileDetails(fileId);
+    const QString path=details.value("path").toString();
+    const QString extension=QFileInfo(path).suffix().toLower();
+    if(extension=="docx" || extension=="pptx") {
+        QSqlQuery query(DatabaseManager::instance().database());
+        query.prepare("SELECT content_text FROM file_content_fts WHERE file_id=?"); query.addBindValue(fileId);
+        if(query.exec() && query.next()) return query.value(0).toString();
+        return QStringLiteral("Text is being indexed. Reopen this document when indexing completes.");
+    }
+    QFile file(path);
+    if(!file.open(QIODevice::ReadOnly)) return QStringLiteral("Unable to read source: ")+file.errorString();
+    constexpr qint64 max=2*1024*1024;
+    QByteArray bytes=file.read(max+1); const bool truncated=bytes.size()>max;
+    QString text=QString::fromUtf8(bytes.left(max));
+    if(truncated)text+=QStringLiteral("\n\n[Preview truncated to 2 MB]");
+    return text;
+}
+
+QVariantMap FileListModel::presentationPdfPreviewById(int fileId) const
+{
+    const QString path=m_repository.getFileDetails(fileId).value("path").toString();
+    QString error; ContentExtractor extractor;
+    const QString pdf=extractor.ensurePresentationPdf(path,&error);
+    return {{"url",pdf.isEmpty()?QString():QUrl::fromLocalFile(pdf).toString()},{"error",error}};
 }
 
 bool FileListModel::openContainingFolder(int fileIndex) const
@@ -1431,31 +1583,25 @@ QVariantMap FileListModel::exportDiagnosticsBundle() const
         return result;
     }
 
-    const QString logsDir = QDir(bundleDir).filePath(QStringLiteral("logs"));
-    dir.mkpath(logsDir);
-
-    const QDir sourceLogsDir(AppConfig::logsDirectory());
-    const QStringList logFiles = sourceLogsDir.entryList(QStringList() << QStringLiteral("ella.log*"),
-                                                         QDir::Files,
-                                                         QDir::Name);
-    for (const QString& fileName : logFiles) {
-        const QString sourcePath = sourceLogsDir.filePath(fileName);
-        const QString destinationPath = QDir(logsDir).filePath(fileName);
-        copyFileIfExists(sourcePath, destinationPath);
-    }
-
     QVariantMap diagnostics;
     diagnostics[QStringLiteral("bundleVersion")] = QStringLiteral("1.0");
     diagnostics[QStringLiteral("generatedAt")] = nowIso();
     diagnostics[QStringLiteral("release")] = releaseMetadata();
-    diagnostics[QStringLiteral("indexStatus")] = indexStatus();
-    diagnostics[QStringLiteral("searchHealth")] = searchHealth();
-    diagnostics[QStringLiteral("importStatus")] = importStatus();
-    diagnostics[QStringLiteral("appDataDirectory")] = AppConfig::appDataDirectory();
-    diagnostics[QStringLiteral("databasePath")] = AppConfig::databasePath();
-    diagnostics[QStringLiteral("logsDirectory")] = AppConfig::logsDirectory();
+    QVariantMap safeIndex=indexStatus(); safeIndex.remove("lastError");
+    diagnostics[QStringLiteral("indexStatus")] = safeIndex;
+    QVariantMap safeHealth;
+    const auto fullHealth=searchHealth();
+    for(auto it=fullHealth.cbegin();it!=fullHealth.cend();++it)
+        if(it.value().metaType().id()==QMetaType::Bool || it.value().metaType().id()==QMetaType::Int
+           || it.value().metaType().id()==QMetaType::LongLong) safeHealth[it.key()]=it.value();
+    diagnostics[QStringLiteral("searchHealth")] = safeHealth;
+    QVariantMap safeImport;
+    const auto fullImport=importStatus();
+    for(auto it=fullImport.cbegin();it!=fullImport.cend();++it)
+        if(it.value().canConvert<int>() && it.value().metaType().id()!=QMetaType::QString) safeImport[it.key()]=it.value();
+    diagnostics[QStringLiteral("importStatus")] = safeImport;
     diagnostics[QStringLiteral("cloudExperimental")] = cloudSyncExperimental();
-    diagnostics[QStringLiteral("cloudStatus")] = m_cloudSyncService ? m_cloudSyncService->status() : QVariantMap();
+    diagnostics[QStringLiteral("privacy")] = QStringLiteral("Queries, document contents, raw logs, and free-text errors are excluded.");
 
     auto countQuery = [](const QString& sql) -> int {
         QSqlQuery query(DatabaseManager::instance().database());
@@ -1473,24 +1619,8 @@ QVariantMap FileListModel::exportDiagnosticsBundle() const
     dbSummary[QStringLiteral("retrievalEvents")] = countQuery(QStringLiteral("SELECT COUNT(*) FROM retrieval_events"));
     diagnostics[QStringLiteral("databaseSummary")] = dbSummary;
 
-    diagnostics[QStringLiteral("recentIndexErrors")] = queryRows(QStringLiteral(R"(
-        SELECT file_id, extractor, last_error, indexed_at
-        FROM file_index_state
-        WHERE status = 'error' AND IFNULL(TRIM(last_error), '') <> ''
-        ORDER BY indexed_at DESC
-        LIMIT 50
-    )"));
-
-    diagnostics[QStringLiteral("recentSyncErrors")] = queryRows(QStringLiteral(R"(
-        SELECT provider, job_type, last_error, updated_at
-        FROM sync_jobs
-        WHERE status = 'failed' AND IFNULL(TRIM(last_error), '') <> ''
-        ORDER BY updated_at DESC
-        LIMIT 50
-    )"));
-
     diagnostics[QStringLiteral("recentOperationTimeline")] = queryRows(QStringLiteral(R"(
-        SELECT event_type, query_text, file_id, latency_ms, useful_state, created_at
+        SELECT event_type, file_id, latency_ms, useful_state, created_at
         FROM retrieval_events
         ORDER BY created_at DESC
         LIMIT 200
@@ -1537,7 +1667,7 @@ QVariantMap FileListModel::releaseMetadata() const
 
 bool FileListModel::cloudSyncExperimental() const
 {
-    return true;
+    return bool(ELLA_DEVELOPER_CLOUD_SYNC);
 }
 
 bool FileListModel::shouldShowBetaScopeNotice() const

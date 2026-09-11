@@ -3,24 +3,27 @@ import QtQuick
 QtObject {
     id: tokens
 
+    property bool darkMode: false
+    property bool reducedMotion: false
+
     readonly property string fontFamily: "Segoe UI"
 
-    readonly property color bg: "#f3f5f8"
-    readonly property color panel: "#ffffff"
-    readonly property color panelSoft: "#f8fafc"
-    readonly property color panelMuted: "#eef3f8"
+    readonly property color bg: darkMode ? "#181d1c" : "#f5f4f0"
+    readonly property color panel: darkMode ? "#212826" : "#ffffff"
+    readonly property color panelSoft: darkMode ? "#252e2b" : "#faf9f6"
+    readonly property color panelMuted: darkMode ? "#2d3833" : "#eeeee8"
 
-    readonly property color border: "#d9e2ec"
-    readonly property color borderSoft: "#c9d5e2"
+    readonly property color border: darkMode ? "#39463f" : "#e1e3dc"
+    readonly property color borderSoft: darkMode ? "#53635b" : "#c8d0c6"
 
-    readonly property color textPrimary: "#0f172a"
-    readonly property color textSecondary: "#475569"
-    readonly property color textMuted: "#64748b"
+    readonly property color textPrimary: darkMode ? "#eff3ed" : "#24352f"
+    readonly property color textSecondary: darkMode ? "#bdc9c0" : "#617067"
+    readonly property color textMuted: darkMode ? "#a2b1a7" : "#6f7b72"
 
-    readonly property color accent: "#0f766e"
-    readonly property color accentHover: "#115e59"
-    readonly property color accentSoft: "#e6f4f1"
-    readonly property color accentBorder: "#a7d9d2"
+    readonly property color accent: darkMode ? "#46b9a5" : "#137c69"
+    readonly property color accentHover: darkMode ? "#66cbb8" : "#0b6253"
+    readonly property color accentSoft: darkMode ? "#23463c" : "#e6f3ec"
+    readonly property color accentBorder: darkMode ? "#3f7563" : "#b4d9ca"
 
     readonly property color successBg: "#e7f8ef"
     readonly property color successBorder: "#34c07a"
@@ -38,14 +41,14 @@ QtObject {
     readonly property color infoBorder: "#84c5ee"
     readonly property color infoText: "#0f5f99"
 
-    readonly property color sidebarA: "#0f172a"
-    readonly property color sidebarB: "#111827"
-    readonly property color sidebarC: "#1f2937"
-    readonly property color sidebarText: "#e5e7eb"
-    readonly property color sidebarMutedText: "#94a3b8"
-    readonly property color sidebarActiveBg: "#14343a"
-    readonly property color sidebarActiveBorder: "#14b8a6"
-    readonly property color sidebarActiveText: "#ccfbf1"
+    readonly property color sidebarA: darkMode ? "#1c2420" : "#efefe8"
+    readonly property color sidebarB: panelSoft
+    readonly property color sidebarC: border
+    readonly property color sidebarText: textPrimary
+    readonly property color sidebarMutedText: textSecondary
+    readonly property color sidebarActiveBg: accentSoft
+    readonly property color sidebarActiveBorder: accentBorder
+    readonly property color sidebarActiveText: accent
 
     readonly property int radiusXs: 4
     readonly property int radiusSm: 8

@@ -11,12 +11,14 @@ class NoteManager : public QObject
     Q_OBJECT
     Q_PROPERTY(QString notesDirectory READ notesDirectory CONSTANT)
     Q_PROPERTY(QString defaultNoteAuthor READ defaultNoteAuthor CONSTANT)
+    Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
 
 public:
     explicit NoteManager(QObject* parent = nullptr);
 
     QString notesDirectory() const;
     QString defaultNoteAuthor() const;
+    QString lastError() const { return m_lastError; }
 
     Q_INVOKABLE QVariantList listNotes(const QString& searchText = QString(),
                                        const QString& metadataFilter = QString()) const;
@@ -43,7 +45,12 @@ public:
     Q_INVOKABLE QString htmlToMarkdown(const QString& html) const;
     Q_INVOKABLE QString markdownToHtml(const QString& markdown) const;
 
+signals:
+    void lastErrorChanged();
+    void noteSaved(int fileId);
 private:
+    bool fail(const QString& error);
+    QString m_lastError;
     struct NoteFrontmatter
     {
         QString title;

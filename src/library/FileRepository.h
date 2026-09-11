@@ -10,10 +10,13 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QSqlQuery>
+#include <QSqlDatabase>
 
 class FileRepository
 {
 public:
+    explicit FileRepository(const QString& connectionName = QStringLiteral("secondbrain_connection"))
+        : m_connectionName(connectionName) {}
     bool addFile(const QString& filePath,
                  const QString& technicalDomain,
                  const QString& subject,
@@ -36,9 +39,13 @@ public:
                                  const QString& dateFrom,
                                  const QString& dateTo,
                                  const QString& sortField,
-                                 bool sortAscending) const;
+                                 bool sortAscending,
+                                 int limit = -1, int offset = 0, int* totalCount = nullptr,
+                                 bool favoritesOnly = false, const QString& folder = {},
+                                 const QString& tag = {}) const;
 
     QVariantMap getFileDetails(int fileId) const;
+    bool fileById(int fileId, FileRecord* result) const;
     QVariantMap getFileDetailsByPath(const QString& absolutePath) const;
 
     QVariantList searchReferenceTargets(const QString& queryText, int limit = 20) const;
@@ -80,6 +87,8 @@ public:
     QVariantList getHierarchyTreeFlat() const;
 
 private:
+    QSqlDatabase database() const { return QSqlDatabase::database(m_connectionName); }
+    QString m_connectionName;
     FileRecord fileFromQuery(const QSqlQuery& q) const;
     QList<FileRecord> getAllFilesRaw() const;
     QList<QVariantMap> getAllCollectionsRaw() const;

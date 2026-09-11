@@ -95,6 +95,10 @@ QString AppConfig::defaultNoteAuthor()
 
 QString AppConfig::notesDirectory()
 {
+    // Test/portable profiles must never create notes in the real Documents folder.
+    if (qEnvironmentVariableIsSet("ELLA_APP_DATA_DIR")) {
+        return ensureDirectory(appDataDirectory() + QStringLiteral("/notes"));
+    }
     const QString documentsPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     const QString notesPath = documentsPath + "/Ella Notes";
 

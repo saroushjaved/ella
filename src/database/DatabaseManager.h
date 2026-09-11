@@ -18,8 +18,8 @@ private:
     void closeConnection();
     bool validateIntegrity();
     bool pruneCorruptedIndexRows();
-    bool recoverCorruptDatabase(const QString& reason);
     bool createTables();
+    bool migrate();
 
     QString m_connectionName = "secondbrain_connection";
     QString m_lastError;

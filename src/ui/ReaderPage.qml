@@ -5,11 +5,16 @@ import QtQuick.Pdf
 
 Page {
     id: root
-    EllaTokens { id: theme }
+    property bool darkMode: false
+    property var initialAnchor: ({})
+    signal requestBack()
+    signal sourceNoteCreated(int noteId)
+    signal openRelatedSource(int fileId, var anchor)
+    EllaTokens { id: theme; darkMode: root.darkMode }
 
-    required property int fileIndex
     required property var fileDetails
     required property var navigationStack
+    property int fileIndex: fileListModel.indexOfFileId(fileId)
     font.family: theme.fontFamily
 
     readonly property color bgColor: theme.bg
@@ -70,11 +75,27 @@ Page {
     property string annotationSearchText: ""
     property int selectedVisualAnnotationId: -1
     property int pdfCurrentPage: 0
+    property double relatedRequest: 0
+    property var relatedResults: []
+    property string relatedError: ""
+
+    function findRelated() {
+        relatedResults = []; relatedError = ""; relatedDialog.open()
+        relatedRequest = Number(semanticSearchService.relatedPassages(fileId, Math.max(0, Number(initialAnchor.passageOrdinal || 0)), 20))
+        if (!relatedRequest) relatedError = semanticSearchService.status
+    }
+
+    Connections {
+        target: semanticSearchService
+        function onResultsReady(requestId, query, results, error) {
+            if (Number(requestId) !== root.relatedRequest) return
+            root.relatedResults = results || []; root.relatedError = error || ""
+        }
+    }
 
     property var indexStatusMap: ({})
     property var searchHealthMap: ({})
     property var importStatusMap: ({})
-    property var syncStatusMap: ({})
 
     property int textSelectionStartCached: -1
     property int textSelectionEndCached: -1
@@ -107,11 +128,6 @@ Page {
         indexStatusMap = fileListModel.indexStatus()
         searchHealthMap = fileListModel.searchHealth()
         importStatusMap = fileListModel.importStatus()
-        if (cloudSyncModel) {
-            syncStatusMap = cloudSyncModel.status()
-        } else {
-            syncStatusMap = ({})
-        }
         updateToolingWarnings()
     }
 
@@ -139,55 +155,6 @@ Page {
         if (ext.startsWith("."))
             ext = ext.substring(1)
         return ext
-    }
-
-    function syncChipState() {
-        const indexingRunning = !!indexStatusMap.running
-        const connectedProviders = Number(syncStatusMap.connectedProviders || 0)
-        const syncRunning = !!syncStatusMap.running
-        if (indexingRunning || syncRunning) {
-            return "processing"
-        }
-        if (connectedProviders > 0) {
-            return "up_to_date"
-        }
-        return "disconnected"
-    }
-
-    function syncChipText() {
-        const state = syncChipState()
-        if (state === "processing")
-            return "SYNC (EXPERIMENTAL): PROCESSING"
-        if (state === "up_to_date")
-            return "SYNC (EXPERIMENTAL): UP-TO-DATE"
-        return "SYNC (EXPERIMENTAL): GOOGLE DISCONNECTED"
-    }
-
-    function syncChipBg() {
-        const state = syncChipState()
-        if (state === "processing")
-            return infoBg
-        if (state === "up_to_date")
-            return successBg
-        return dangerBg
-    }
-
-    function syncChipBorder() {
-        const state = syncChipState()
-        if (state === "processing")
-            return infoBorder
-        if (state === "up_to_date")
-            return successBorder
-        return dangerBorder
-    }
-
-    function syncChipTextColor() {
-        const state = syncChipState()
-        if (state === "processing")
-            return infoText
-        if (state === "up_to_date")
-            return successText
-        return dangerText
     }
 
     function isImageFile() {
@@ -731,13 +698,13 @@ Page {
     Component.onCompleted: {
         pdfPreviewErrorText = ""
         if (isTextFile())
-            textPreview = fileListModel.readTextFile(fileIndex)
+            textPreview = fileListModel.readTextFileById(fileId)
         if (isPdfFile()) {
-            resolvedPdfPreviewUrl = fileListModel.fileUrl(fileIndex)
+            resolvedPdfPreviewUrl = fileListModel.fileUrlById(fileId)
             if (String(resolvedPdfPreviewUrl || "").trim() === "")
                 pdfPreviewErrorText = "PDF preview unavailable. Source file is missing. Use Open Externally."
         } else if (isPresentationFile()) {
-            const presentationPreview = fileListModel.presentationPdfPreview(fileIndex)
+            const presentationPreview = fileListModel.presentationPdfPreviewById(fileId)
             resolvedPdfPreviewUrl = presentationPreview.url || ""
             if (resolvedPdfPreviewUrl === "") {
                 pdfPreviewErrorText = presentationPreview.error && presentationPreview.error !== ""
@@ -756,7 +723,13 @@ Page {
         clearCachedTextSelection()
         refreshAnnotations()
         refreshServiceStatus()
-        pdfCurrentPage = 0
+        const restored = Object.keys(initialAnchor || {}).length ? initialAnchor : libraryService.readingPosition(fileId)
+        pdfCurrentPage = Math.max(0, Number(restored.pageNumber || 1) - 1)
+    }
+
+    Component.onDestruction: {
+        if (fileId >= 0)
+            libraryService.saveReadingPosition(fileId, ({anchorType: isPdfFile() || isPresentationFile() ? "page" : "text", pageNumber: pdfCurrentPage + 1, charStart: textContentRef ? textContentRef.cursorPosition : 0}))
     }
 
     Connections {
@@ -1094,168 +1067,143 @@ Page {
     header: Rectangle {
         color: panelColor
         border.color: borderColor
-        implicitHeight: readerHeaderLayout.implicitHeight + 22
+        implicitHeight: readerHeaderLayout.implicitHeight + 20
 
-        RowLayout {
+        ColumnLayout {
             id: readerHeaderLayout
             anchors.fill: parent
             anchors.margins: 10
-            spacing: 10
+            spacing: 8
 
-            AppButton {
-                text: "\u2039  Back"
-                fillColor: panelSoft
-                borderLine: borderColor
-                labelColor: textPrimary
-                implicitHeight: 36
-                radiusValue: 8
-                onClicked: {
-                    if (navigationStack)
-                        navigationStack.pop()
-                }
-            }
-
-            Rectangle {
-                Layout.preferredWidth: 1
-                Layout.fillHeight: true
-                color: borderColor
-                opacity: 0.8
-            }
-
-            ColumnLayout {
+            RowLayout {
                 Layout.fillWidth: true
-                spacing: 1
+                spacing: 10
 
-                Label {
-                    text: "READER MODE"
-                    color: textSecondary
-                    font.bold: true
-                    font.pixelSize: 12
-                    font.letterSpacing: 0.3
+                AppButton {
+                    text: "\u2039  Back"
+                    fillColor: panelSoft
+                    borderLine: borderColor
+                    labelColor: textPrimary
+                    implicitHeight: 36
+                    radiusValue: 8
+                    onClicked: root.requestBack()
                 }
 
-                Label {
-                    text: "Memory: [" + (fileDetails && fileDetails.name ? fileDetails.name : "Untitled") + "]"
-                    color: textPrimary
-                    font.bold: true
-                    font.pixelSize: 34
+                Rectangle {
+                    Layout.preferredWidth: 1
+                    Layout.fillHeight: true
+                    color: borderColor
+                    opacity: 0.8
+                }
+
+                ColumnLayout {
                     Layout.fillWidth: true
-                    elide: Text.ElideRight
-                }
+                    spacing: 1
 
-                Label {
-                    text: "Source: " + (fileDetails && fileDetails.source ? fileDetails.source : "Unknown Source")
-                    color: textSecondary
-                    font.pixelSize: 18
-                    Layout.fillWidth: true
-                    elide: Text.ElideMiddle
-                }
-            }
-
-            Rectangle {
-                radius: 10
-                color: panelSoft
-                border.color: borderColor
-                visible: isImageFile() || isTextFile() || isPdfFile() || isPresentationFile()
-                implicitHeight: zoomBar.implicitHeight + 10
-                implicitWidth: zoomBar.implicitWidth + 12
-
-                RowLayout {
-                    id: zoomBar
-                    anchors.centerIn: parent
-                    spacing: 5
-
-                    AppButton {
-                        text: "-"
-                        implicitHeight: 30
-                        Layout.preferredWidth: 30
-                        leftPadding: 0
-                        rightPadding: 0
-                        radiusValue: 6
-                        onClicked: zoomOut()
+                    Label {
+                        text: "READER"
+                        color: textSecondary
+                        font.bold: true
+                        font.pixelSize: 10
+                        font.letterSpacing: 1.2
                     }
 
-                    AppButton {
-                        text: "+"
-                        implicitHeight: 30
-                        Layout.preferredWidth: 30
-                        leftPadding: 0
-                        rightPadding: 0
-                        radiusValue: 6
-                        onClicked: zoomIn()
-                    }
-
-                    AppButton {
-                        text: "%"
-                        implicitHeight: 30
-                        Layout.preferredWidth: 30
-                        leftPadding: 0
-                        rightPadding: 0
-                        radiusValue: 6
-                        fillColor: panelColor
-                        borderLine: borderColor
-                    }
-
-                    Rectangle {
-                        radius: 6
-                        color: panelColor
-                        border.color: borderColor
-                        implicitHeight: 30
-                        implicitWidth: Math.max(52, zoomPercentLabel.implicitWidth + 10)
-
-                        Label {
-                            id: zoomPercentLabel
-                            anchors.centerIn: parent
-                            text: currentZoomText()
-                            color: textPrimary
-                            font.bold: true
-                            font.pixelSize: 12
-                        }
-                    }
-
-                    AppButton {
-                        text: "Reset"
-                        implicitHeight: 30
-                        radiusValue: 6
-                        onClicked: resetZoom()
+                    Label {
+                        text: fileDetails && fileDetails.name ? fileDetails.name : "Untitled source"
+                        color: textPrimary
+                        font.bold: true
+                        font.pixelSize: 21
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
                     }
                 }
-            }
 
-            Rectangle {
-                Layout.preferredWidth: 1
-                Layout.fillHeight: true
-                color: borderColor
-                opacity: 0.8
+                AppButton {
+                    text: "Open original"
+                    implicitHeight: 36
+                    fillColor: panelSoft
+                    borderLine: borderColor
+                    onClicked: fileListModel.openFileById(fileId)
+                }
+
+                AppButton {
+                    text: "Open folder"
+                    visible: root.width >= 980
+                    implicitHeight: 36
+                    fillColor: panelSoft
+                    borderLine: borderColor
+                    onClicked: fileListModel.openContainingFolderById(fileId)
+                }
             }
 
             RowLayout {
-                spacing: 6
+                Layout.fillWidth: true
+                spacing: 7
 
-                AppButton {
-                    text: "Open Original"
-                    implicitHeight: 36
-                    fillColor: panelSoft
-                    borderLine: borderColor
-                    onClicked: fileListModel.openFile(fileIndex)
+                Rectangle {
+                    radius: 9
+                    color: panelSoft
+                    border.color: borderColor
+                    visible: isImageFile() || isTextFile() || isPdfFile() || isPresentationFile()
+                    implicitHeight: zoomBar.implicitHeight + 8
+                    implicitWidth: zoomBar.implicitWidth + 10
+
+                    RowLayout {
+                        id: zoomBar
+                        anchors.centerIn: parent
+                        spacing: 4
+
+                        AppButton { text: "−"; implicitHeight: 28; Layout.preferredWidth: 28; leftPadding: 0; rightPadding: 0; radiusValue: 6; onClicked: zoomOut() }
+                        AppButton { text: "+"; implicitHeight: 28; Layout.preferredWidth: 28; leftPadding: 0; rightPadding: 0; radiusValue: 6; onClicked: zoomIn() }
+                        Rectangle {
+                            radius: 6; color: panelColor; border.color: borderColor
+                            implicitHeight: 28; implicitWidth: Math.max(52, zoomPercentLabel.implicitWidth + 10)
+                            Label { id: zoomPercentLabel; anchors.centerIn: parent; text: currentZoomText(); color: textPrimary; font.bold: true; font.pixelSize: 11 }
+                        }
+                        AppButton { text: "Reset"; implicitHeight: 28; radiusValue: 6; onClicked: resetZoom() }
+                    }
                 }
 
                 AppButton {
-                    text: "Open Folder"
+                    text: "Save passage"
+                    Layout.preferredWidth: 108
                     implicitHeight: 36
-                    fillColor: panelSoft
-                    borderLine: borderColor
-                    onClicked: fileListModel.openContainingFolder(fileIndex)
+                    fillColor: accentSoft
+                    borderLine: accentBorder
+                    labelColor: accentColor
+                    onClicked: {
+                        const quote = textContentRef && textContentRef.selectedText
+                                      ? normalizeSelectedText(textContentRef.selectedText)
+                                      : (textPreview ? String(textPreview).slice(0, 600) : "")
+                        const anchor = ({anchorType: isPdfFile() || isPresentationFile() ? "page" : "text",
+                                         pageNumber: pdfCurrentPage + 1,
+                                         charStart: textContentRef ? textContentRef.selectionStart : -1,
+                                         charEnd: textContentRef ? textContentRef.selectionEnd : -1,
+                                         locator: isPdfFile() || isPresentationFile() ? "Page " + (pdfCurrentPage + 1) : "Selected passage"})
+                        const result = workspaceService.createSourceNote(fileId, "Insight from " + (fileDetails.name || "source"), quote, anchor)
+                        if (result.ok) root.sourceNoteCreated(Number(result.id))
+                        else readerStatusMessage = result.error || "Could not save the passage."
+                    }
                 }
 
                 AppButton {
-                    text: "Remove File"
+                    text: "Related"
+                    visible: semanticSearchService.available
+                    implicitHeight: 36
+                    fillColor: panelSoft
+                    borderLine: borderColor
+                    onClicked: root.findRelated()
+                }
+
+                AppButton {
+                    text: "Remove from library"
+                    Layout.preferredWidth: 150
                     implicitHeight: 36
                     fillColor: dangerBg
                     borderLine: dangerBorder
                     labelColor: dangerText
                     onClicked: {
-                        const ok = fileListModel.removeFile(fileIndex)
+                        const ok = libraryService.removeFile(fileId)
                         if (ok) {
                             if (navigationStack)
                                 navigationStack.pop()
@@ -1264,43 +1212,15 @@ Page {
                         }
                     }
                 }
-            }
 
-            Rectangle {
-                visible: toolingWarningMessage !== ""
-                radius: 10
-                color: warningBg
-                border.color: warningBorder
-                implicitHeight: toolingWarningLabel.implicitHeight + 10
-                implicitWidth: Math.min(360, toolingWarningLabel.implicitWidth + 16)
-
+                Item { Layout.fillWidth: true }
                 Label {
-                    id: toolingWarningLabel
-                    anchors.centerIn: parent
-                    text: "Tooling warning: " + toolingWarningMessage
-                    color: warningText
-                    font.bold: true
-                    font.pixelSize: 12
+                    visible: readerStatusMessage !== ""
+                    text: readerStatusMessage
+                    color: readerStatusMessage.toLowerCase().indexOf("unable") >= 0 ? dangerText : textSecondary
+                    font.pixelSize: 11
                     elide: Text.ElideRight
-                    width: Math.min(344, implicitWidth)
-                    horizontalAlignment: Text.AlignHCenter
-                }
-            }
-
-            Rectangle {
-                radius: 10
-                color: syncChipBg()
-                border.color: syncChipBorder()
-                implicitHeight: 36
-                implicitWidth: syncStateLabel.implicitWidth + 18
-
-                Label {
-                    id: syncStateLabel
-                    anchors.centerIn: parent
-                    text: syncChipText()
-                    color: syncChipTextColor()
-                    font.bold: true
-                    font.pixelSize: 12
+                    Layout.maximumWidth: 360
                 }
             }
         }
@@ -1674,7 +1594,7 @@ Page {
                                 Label { text: formatDateShort(fileDetails && fileDetails.indexedAt ? fileDetails.indexedAt : ""); color: textPrimary }
 
                                 Label { text: "Path"; color: textSecondary; font.pixelSize: 12 }
-                                Label { text: fileDetails && fileDetails.path ? fileDetails.path : "-"; color: textPrimary; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }
+                                Label { text: applicationScreenshotMode ? "C:/Research Library/sample-research.md" : (fileDetails && fileDetails.path ? fileDetails.path : "-"); color: textPrimary; wrapMode: Text.WrapAnywhere; Layout.fillWidth: true }
                             }
                         }
                     }
@@ -1941,7 +1861,7 @@ Page {
                     Image {
                         id: previewImage
                         anchors.fill: parent
-                        source: fileListModel.fileUrl(fileIndex)
+                        source: fileListModel.fileUrlById(fileId)
                         asynchronous: true
                         cache: false
                         fillMode: Image.PreserveAspectFit
@@ -2639,7 +2559,7 @@ Page {
                                 borderLine: accentColor
                                 labelColor: "#ffffff"
                                 Layout.alignment: Qt.AlignHCenter
-                                onClicked: fileListModel.openFile(fileIndex)
+                                onClicked: fileListModel.openFileById(fileId)
                             }
                         }
                     }
@@ -2708,7 +2628,7 @@ Page {
                 onStatusChanged: {
                     if (status === Loader.Ready && item) {
                         root.mediaControllerRef = item
-                        item.mediaUrl = fileListModel.fileUrl(fileIndex)
+                        item.mediaUrl = fileListModel.fileUrlById(fileId)
                         item.videoMode = isVideoFile()
                         item.panelSoft = panelSoft
                         item.panelColor = panelColor
@@ -2790,7 +2710,7 @@ Page {
                         borderLine: accentColor
                         labelColor: "#ffffff"
                         Layout.alignment: Qt.AlignHCenter
-                        onClicked: fileListModel.openFile(fileIndex)
+                        onClicked: fileListModel.openFileById(fileId)
                     }
                 }
             }
@@ -2798,6 +2718,34 @@ Page {
             Component.onDestruction: {
                 if (root.mediaControllerRef === mediaPreviewLoader.item)
                     root.mediaControllerRef = null
+            }
+        }
+    }
+
+    Dialog {
+        id: relatedDialog
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(640, root.width - 80)
+        height: Math.min(560, root.height - 80)
+        title: "Related passages"
+        contentItem: ColumnLayout {
+            spacing: 10
+            Label { visible: semanticSearchService.busy && root.relatedResults.length === 0; text: "Finding related passages…"; color: textSecondary }
+            Label { visible: root.relatedError !== ""; text: root.relatedError; color: warningText; Layout.fillWidth: true; wrapMode: Text.WordWrap }
+            Label { visible: !semanticSearchService.busy && root.relatedError === "" && root.relatedResults.length === 0; text: "No related passages found."; color: textSecondary }
+            ListView {
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true; spacing: 6; model: root.relatedResults
+                delegate: ItemDelegate {
+                    required property var modelData
+                    width: ListView.view.width; implicitHeight: passageColumn.implicitHeight + 20
+                    contentItem: ColumnLayout {
+                        id: passageColumn
+                        Label { text: modelData.locator || "Passage"; color: accentColor; font.pixelSize: 11; font.bold: true }
+                        Label { text: modelData.text || ""; color: textPrimary; Layout.fillWidth: true; wrapMode: Text.WordWrap; maximumLineCount: 4; elide: Text.ElideRight }
+                    }
+                    onClicked: { relatedDialog.close(); root.openRelatedSource(Number(modelData.fileId), modelData.anchor || ({})) }
+                }
             }
         }
     }
@@ -2848,7 +2796,7 @@ Page {
                     borderLine: accentColor
                     labelColor: "#ffffff"
                     Layout.alignment: Qt.AlignHCenter
-                    onClicked: fileListModel.openFile(fileIndex)
+                    onClicked: fileListModel.openFileById(fileId)
                 }
             }
         }

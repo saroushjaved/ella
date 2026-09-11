@@ -30,7 +30,7 @@ Button {
     }
     property color labelColor: {
         if (tone === "primary")
-            return "#ffffff"
+            return tokens.darkMode ? "#102b23" : "#ffffff"
         if (tone === "success")
             return tokens.successText
         if (tone === "danger")
@@ -41,6 +41,8 @@ Button {
     property string tone: "secondary" // primary, secondary, ghost, success, danger
 
     hoverEnabled: true
+    Accessible.name: text
+    activeFocusOnTab: true
     implicitHeight: 40
     leftPadding: 14
     rightPadding: 14
@@ -58,8 +60,8 @@ Button {
                 return Qt.lighter(control.fillColor, 1.02)
             return control.fillColor
         }
-        border.color: control.enabled ? control.borderLine : Qt.darker(control.borderLine, 1.03)
-        border.width: 1
+        border.color: control.activeFocus ? control.tokens.accent : (control.enabled ? control.borderLine : Qt.darker(control.borderLine, 1.03))
+        border.width: control.activeFocus ? 2 : 1
         opacity: control.enabled ? 1.0 : 0.6
     }
 

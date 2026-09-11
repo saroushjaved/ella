@@ -10,6 +10,7 @@
 #include <QSet>
 #include <QTextDocument>
 #include <QTextStream>
+#include <QSaveFile>
 
 namespace
 {
@@ -29,6 +30,13 @@ QString safeFrontmatterValue(const QString& value)
 NoteManager::NoteManager(QObject* parent)
     : QObject(parent)
 {
+}
+
+bool NoteManager::fail(const QString& error)
+{
+    m_lastError = error;
+    emit lastErrorChanged();
+    return false;
 }
 
 QString NoteManager::notesDirectory() const
@@ -147,15 +155,20 @@ QVariantMap NoteManager::createNote(const QString& title,
         note.markdownBody = QStringLiteral("# %1\n\n").arg(trimmedTitle);
     }
 
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        fail(file.errorString());
         return {};
     }
 
     QTextStream stream(&file);
     stream.setEncoding(QStringConverter::Utf8);
     stream << buildNoteFileContent(note);
-    file.close();
+    stream.flush();
+    if (stream.status() != QTextStream::Ok || !file.commit()) {
+        fail(QStringLiteral("Could not save note: %1").arg(file.errorString()));
+        return {};
+    }
 
     if (!m_repository.addFile(filePath,
                               note.technicalDomain,
@@ -210,12 +223,12 @@ bool NoteManager::saveNote(int fileId,
 {
     const QVariantMap details = m_repository.getFileDetails(fileId);
     if (details.isEmpty()) {
-        return false;
+        return fail(QStringLiteral("The note is no longer in the library."));
     }
 
     QFile readFile(details.value("path").toString());
     if (!readFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return false;
+        return fail(readFile.errorString());
     }
 
     QTextStream readStream(&readFile);
@@ -243,17 +256,20 @@ bool NoteManager::saveNote(int fileId,
     }
     current.markdownBody = document.toMarkdown();
 
-    QFile writeFile(details.value("path").toString());
-    if (!writeFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        return false;
+    QSaveFile writeFile(details.value("path").toString());
+    if (!writeFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        return fail(writeFile.errorString());
     }
 
     QTextStream writeStream(&writeFile);
     writeStream.setEncoding(QStringConverter::Utf8);
     writeStream << buildNoteFileContent(current);
-    writeFile.close();
+    writeStream.flush();
+    if (writeStream.status() != QTextStream::Ok || !writeFile.commit()) {
+        return fail(QStringLiteral("Could not finish saving the note; the previous version is preserved."));
+    }
 
-    return m_repository.updateFileMetadata(fileId,
+    const bool saved = m_repository.updateFileMetadata(fileId,
                                            current.technicalDomain,
                                            current.subject,
                                            current.subtopic,
@@ -262,6 +278,11 @@ bool NoteManager::saveNote(int fileId,
                                            current.author,
                                            current.type,
                                            QString());
+    if (!saved) return fail(QStringLiteral("Note text was saved, but its library metadata could not be updated."));
+    m_lastError.clear();
+    emit lastErrorChanged();
+    emit noteSaved(fileId);
+    return true;
 }
 
 QVariantList NoteManager::searchReferences(const QString& queryText, int limit) const

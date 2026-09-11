@@ -2,6 +2,7 @@
 #include "database/DatabaseManager.h"
 
 #include <QDate>
+#include <QDir>
 #include <QDateTime>
 #include <QDebug>
 #include <QFileInfo>
@@ -49,10 +50,10 @@ bool FileRepository::addFile(const QString& filePath,
     }
 
     QMimeDatabase mimeDb;
-    QSqlQuery query(DatabaseManager::instance().database());
+    QSqlQuery query(database());
 
     query.prepare(R"(
-        INSERT OR REPLACE INTO files (
+        INSERT INTO files (
             id,
             path,
             name,
@@ -92,7 +93,12 @@ bool FileRepository::addFile(const QString& filePath,
             :document_type,
             :remarks
         )
-    )");
+        ON CONFLICT(path) DO UPDATE SET
+            name=excluded.name,extension=excluded.extension,mime_type=excluded.mime_type,
+            size_bytes=excluded.size_bytes,created_at=excluded.created_at,modified_at=excluded.modified_at,
+            status=0,technical_domain=excluded.technical_domain,subject=excluded.subject,
+            subtopic=excluded.subtopic,location=excluded.location,source=excluded.source,
+            author=excluded.author,document_type=excluded.document_type,remarks=excluded.remarks    )");
 
     query.bindValue(":path_lookup", info.absoluteFilePath());
     query.bindValue(":path", info.absoluteFilePath());
@@ -134,7 +140,7 @@ bool FileRepository::updateFileMetadata(int fileId,
         return false;
     }
 
-    QSqlQuery query(DatabaseManager::instance().database());
+    QSqlQuery query(database());
     query.prepare(R"(
         UPDATE files
         SET technical_domain = ?,
@@ -175,7 +181,7 @@ QVariantMap FileRepository::runIntegrityScan()
 
     const QList<FileRecord> files = getAllFilesRaw();
     QMimeDatabase mimeDb;
-    QSqlDatabase db = DatabaseManager::instance().database();
+    QSqlDatabase db = database();
 
     if (!db.transaction()) {
         qWarning() << "Failed to start transaction for integrity scan:" << db.lastError().text();
@@ -253,7 +259,7 @@ bool FileRepository::relinkFile(int fileId, const QString& newFilePath)
         return false;
     }
 
-    QSqlDatabase db = DatabaseManager::instance().database();
+    QSqlDatabase db = database();
 
     QSqlQuery duplicateCheck(db);
     duplicateCheck.prepare("SELECT id FROM files WHERE path = ? AND id <> ?");
@@ -308,7 +314,7 @@ bool FileRepository::removeFile(int fileId)
         return false;
     }
 
-    QSqlDatabase db = DatabaseManager::instance().database();
+    QSqlDatabase db = database();
     if (!db.transaction()) {
         qWarning() << "Failed to start remove file transaction:" << db.lastError().text();
         return false;
@@ -336,7 +342,13 @@ bool FileRepository::removeFile(int fileId)
         execDeleteByFileId(QStringLiteral("DELETE FROM file_index_state WHERE file_id = ?"), false) &&
         execDeleteByFileId(QStringLiteral("DELETE FROM cloud_file_map WHERE file_id = ?"), false) &&
         execDeleteByFileId(QStringLiteral("DELETE FROM retrieval_events WHERE file_id = ?"), false) &&
-        execDeleteByFileId(QStringLiteral("DELETE FROM file_content_fts WHERE file_id = ?"), true);
+        execDeleteByFileId(QStringLiteral("DELETE FROM file_content_fts WHERE file_id = ?"), true) &&
+        execDeleteByFileId(QStringLiteral("DELETE FROM passage_fts WHERE file_id = ?"), true) &&
+        execDeleteByFileId(QStringLiteral("DELETE FROM passages WHERE file_id = ?"), true) &&
+        execDeleteByFileId(QStringLiteral("DELETE FROM favorites WHERE file_id = ?"), true) &&
+        execDeleteByFileId(QStringLiteral("DELETE FROM file_tags WHERE file_id = ?"), true) &&
+        execDeleteByFileId(QStringLiteral("DELETE FROM reading_positions WHERE file_id = ?"), true) &&
+        execDeleteByFileId(QStringLiteral("DELETE FROM note_links WHERE ? IN (note_file_id, source_file_id)"), true);
 
     if (!cleanupOk) {
         db.rollback();
@@ -395,9 +407,9 @@ FileRecord FileRepository::fileFromQuery(const QSqlQuery& q) const
 QList<FileRecord> FileRepository::getAllFilesRaw() const
 {
     QList<FileRecord> list;
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
 
-    if (!q.exec("SELECT * FROM files ORDER BY indexed_at DESC")) {
+    if (!q.exec("SELECT * FROM files WHERE removed_at IS NULL ORDER BY indexed_at DESC")) {
         qWarning() << "Failed to fetch files:" << q.lastError().text();
         return list;
     }
@@ -412,7 +424,7 @@ QList<FileRecord> FileRepository::getAllFilesRaw() const
 QList<QVariantMap> FileRepository::getAllCollectionsRaw() const
 {
     QList<QVariantMap> list;
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
 
     if (!q.exec("SELECT id, name, parent_collection_id FROM collections ORDER BY name COLLATE NOCASE ASC")) {
         qWarning() << "Failed to fetch collections:" << q.lastError().text();
@@ -436,7 +448,7 @@ QList<int> FileRepository::getCollectionSubtreeIds(int collectionId) const
 {
     QList<int> ids;
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         WITH RECURSIVE subtree(id) AS (
             SELECT id FROM collections WHERE id = ?
@@ -705,7 +717,7 @@ QHash<int, QPair<double, QString>> FileRepository::queryContentMatches(const QSt
     const QString broadQuery = tokens.join(QStringLiteral(" OR "));
 
     auto executeFtsQuery = [&](const QString& ftsQuery, bool isBroadPass) {
-        QSqlQuery query(DatabaseManager::instance().database());
+        QSqlQuery query(database());
         query.prepare(QStringLiteral(R"(
             SELECT file_id,
                    snippet(file_content_fts, 1, '[', ']', ' ... ', 20) AS snippet_text,
@@ -745,246 +757,122 @@ QHash<int, QPair<double, QString>> FileRepository::queryContentMatches(const QSt
 }
 
 QList<FileRecord> FileRepository::queryFiles(const QString& searchText,
-                                             int collectionId,
-                                             const QString& technicalDomain,
-                                             const QString& subject,
-                                             const QString& subtopic,
-                                             const QStringList& statusFilters,
-                                             const QStringList& extensionFilters,
-                                             const QStringList& documentTypeFilters,
-                                             const QString& dateField,
-                                             const QString& dateFrom,
-                                             const QString& dateTo,
-                                             const QString& sortField,
-                                             bool sortAscending) const
+    int collectionId, const QString& technicalDomain, const QString& subject,
+    const QString& subtopic, const QStringList& statusFilters,
+    const QStringList& extensionFilters, const QStringList& documentTypeFilters,
+    const QString& dateField, const QString& dateFrom, const QString& dateTo,
+    const QString& sortField, bool sortAscending, int limit, int offset,
+    int* totalCount, bool favoritesOnly, const QString& folder, const QString& tag) const
 {
     QList<FileRecord> result;
-    const QList<FileRecord> allFiles = getAllFilesRaw();
-    const QHash<int, QPair<double, QString>> contentMatches = queryContentMatches(searchText);
-    const QString trimmedSearch = searchText.trimmed();
-
-    QHash<int, QSet<int>> fileToCollections;
-    {
-        QSqlQuery q(DatabaseManager::instance().database());
-        if (q.exec("SELECT file_id, collection_id FROM file_collections")) {
-            while (q.next()) {
-                fileToCollections[q.value(0).toInt()].insert(q.value(1).toInt());
-            }
-        } else {
-            qWarning() << "Failed to fetch file_collections:" << q.lastError().text();
-        }
+    QVariantMap parameters;
+    auto bind = [&](const QVariant& value) {
+        const QString key = QStringLiteral(":p%1").arg(parameters.size());
+        parameters.insert(key, value); return key;
+    };
+    auto escapedLike = [](QString value) {
+        value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+        return value;
+    };
+    QStringList where{QStringLiteral("f.removed_at IS NULL")};
+    auto equal = [&](const QString& column, const QString& value) {
+        if (!value.trimmed().isEmpty()) where << column + " = " + bind(value.trimmed()) + " COLLATE NOCASE";
+    };
+    equal("f.technical_domain", technicalDomain); equal("f.subject", subject); equal("f.subtopic", subtopic);
+    auto inList = [&](const QString& column, const QStringList& values) {
+        if (values.isEmpty()) return;
+        QStringList placeholders;
+        for (const QString& value : values) placeholders << bind(value.toLower());
+        where << "LOWER(" + column + ") IN (" + placeholders.join(',') + ")";
+    };
+    inList("f.status", statusFilters); inList("f.extension", extensionFilters); inList("f.document_type", documentTypeFilters);
+    const QHash<QString, QString> dates{{"createdAt","created_at"},{"modifiedAt","modified_at"},{"indexedAt","indexed_at"}};
+    const QString dateColumn = dates.value(dateField, "indexed_at");
+    if (QDate::fromString(dateFrom, Qt::ISODate).isValid()) where << "date(f." + dateColumn + ") >= " + bind(dateFrom);
+    if (QDate::fromString(dateTo, Qt::ISODate).isValid()) where << "date(f." + dateColumn + ") <= " + bind(dateTo);
+    if (favoritesOnly) where << "EXISTS(SELECT 1 FROM favorites fav WHERE fav.file_id=f.id)";
+    if (!tag.trimmed().isEmpty()) where << "EXISTS(SELECT 1 FROM file_tags t WHERE t.file_id=f.id AND t.tag=" + bind(tag.trimmed()) + " COLLATE NOCASE)";
+    if (!folder.trimmed().isEmpty()) {
+        QString normalized = QDir::fromNativeSeparators(QFileInfo(folder).absoluteFilePath());
+        if (!normalized.endsWith('/')) normalized += '/';
+        where << "REPLACE(f.path,'\\','/') LIKE " + bind(escapedLike(normalized) + "%") + " ESCAPE '\\'";
     }
-
-    QSet<int> subtreeSet;
-    QHash<int, QList<QVariantMap>> rulesByCollection;
-
     if (collectionId >= 0) {
-        const QList<int> subtreeIds = getCollectionSubtreeIds(collectionId);
-        for (int id : subtreeIds) {
-            subtreeSet.insert(id);
-        }
-
-        if (!subtreeIds.isEmpty()) {
-            QString placeholders;
-            for (int i = 0; i < subtreeIds.size(); ++i) {
-                if (i > 0) placeholders += ",";
-                placeholders += "?";
+        const QList<int> ids = getCollectionSubtreeIds(collectionId);
+        QStringList placeholders;
+        for (int id : ids) placeholders << bind(id);
+        if (placeholders.isEmpty()) where << "0";
+        else {
+            const QString list = placeholders.join(',');
+            QStringList alternatives{"EXISTS(SELECT 1 FROM file_collections fc WHERE fc.file_id=f.id AND fc.collection_id IN (" + list + "))"};
+            QSqlQuery rules(database());
+            rules.prepare("SELECT collection_id,field_name,operator_type,value FROM collection_rules WHERE collection_id IN (" + list + ")");
+            for (const QString& key : placeholders) rules.bindValue(key, parameters.value(key));
+            const QSet<QString> allowed{"technical_domain","subject","subtopic","location","source","author","document_type","remarks","name","path"};
+            QHash<int,QStringList> grouped;
+            if (rules.exec()) while (rules.next()) {
+                const int id = rules.value(0).toInt();
+                const QString field = rules.value(1).toString(), op = rules.value(2).toString(), value = rules.value(3).toString().trimmed();
+                if (!allowed.contains(field) || value.isEmpty() || (op != "exact" && op != "contains")) { grouped[id] << "0"; continue; }
+                grouped[id] << (op == "exact" ? "f." + field + " = " + bind(value) + " COLLATE NOCASE"
+                    : "f." + field + " LIKE " + bind("%" + escapedLike(value) + "%") + " ESCAPE '\\'");
             }
-
-            QSqlQuery rulesQuery(DatabaseManager::instance().database());
-            const QString sql = QString(
-                                    "SELECT collection_id, field_name, operator_type, value "
-                                    "FROM collection_rules WHERE collection_id IN (%1)")
-                                    .arg(placeholders);
-
-            rulesQuery.prepare(sql);
-            for (int id : subtreeIds) {
-                rulesQuery.addBindValue(id);
-            }
-
-            if (rulesQuery.exec()) {
-                while (rulesQuery.next()) {
-                    QVariantMap rule;
-                    rule["fieldName"] = rulesQuery.value(1).toString();
-                    rule["operatorType"] = rulesQuery.value(2).toString();
-                    rule["value"] = rulesQuery.value(3).toString();
-                    rulesByCollection[rulesQuery.value(0).toInt()].append(rule);
-                }
-            } else {
-                qWarning() << "Failed to fetch collection rules for subtree:"
-                           << rulesQuery.lastError().text();
-            }
+            for (auto it=grouped.cbegin();it!=grouped.cend();++it) alternatives << "(" + it.value().join(" AND ") + ")";
+            where << "(" + alternatives.join(" OR ") + ")";
         }
     }
-
-    for (const FileRecord& file : allFiles) {
-        if (!fileMatchesHierarchy(file, technicalDomain, subject, subtopic)) {
-            continue;
+    QString cte, join, snippet = "''", score = "0", reason = "''";
+    QString passageId="NULL", passageOrdinal="NULL", anchorType="NULL", pageNumber="NULL", charStart="NULL", charEnd="NULL", timeStartMs="NULL", locator="NULL";
+    const QString trimmed = searchText.trimmed();
+    if (!trimmed.isEmpty()) {
+        QStringList ftsTokens, metadataTerms;
+        QRegularExpression tokenPattern(QStringLiteral("\"([^\"]+)\"|(\\S+)"));
+        auto tokens = tokenPattern.globalMatch(trimmed);
+        while (tokens.hasNext()) {
+            const auto token = tokens.next();
+            QString word = token.captured(1).isEmpty() ? token.captured(2) : token.captured(1);
+            const bool phrase = !token.captured(1).isEmpty();
+            QString escaped = word; escaped.replace('"', "\"\"");
+            ftsTokens << "\"" + escaped + "\"" + (phrase ? "" : "*");
+            const QString match = bind("%" + escapedLike(word) + "%");
+            metadataTerms << "(COALESCE(f.name,'')||' '||COALESCE(f.path,'')||' '||COALESCE(f.subject,'')||' '||COALESCE(f.subtopic,'')||' '||COALESCE(f.technical_domain,'')||' '||COALESCE(f.author,'')||' '||COALESCE(f.remarks,'')||' '||COALESCE(f.source,'')) LIKE " + match + " ESCAPE '\\'";
         }
-
-        const bool metadataMatch = fileMatchesSearch(file, searchText);
-        const bool contentMatch = contentMatches.contains(file.id);
-        if (!trimmedSearch.isEmpty() && !metadataMatch && !contentMatch) {
-            continue;
+        if (!ftsTokens.isEmpty()) {
+            cte = "WITH raw_hits AS MATERIALIZED (SELECT CAST(passage_id AS INTEGER) AS pid,CAST(file_id AS INTEGER) AS fid,snippet(passage_fts,2,'[',']',' … ',24) AS excerpt,bm25(passage_fts) AS ranking FROM passage_fts WHERE passage_fts MATCH " + bind(ftsTokens.join(" AND ")) + "), ranked_hits AS MATERIALIZED (SELECT *,ROW_NUMBER() OVER(PARTITION BY fid ORDER BY ranking,pid) AS passage_rank FROM raw_hits), hits AS MATERIALIZED (SELECT r.fid,r.pid,r.excerpt,r.ranking,p.ordinal,p.anchor_type,p.page_number,p.char_start,p.char_end,p.time_start_ms,p.locator FROM ranked_hits r JOIN passages p ON p.id=r.pid WHERE r.passage_rank=1) ";
+            join = " LEFT JOIN hits ON hits.fid=f.id ";
+            where << "((" + metadataTerms.join(" AND ") + ") OR hits.fid IS NOT NULL)";
+            snippet = "COALESCE(hits.excerpt, f.path)";
+            score = "CASE WHEN hits.fid IS NOT NULL THEN 120 - hits.ranking ELSE 0 END + CASE WHEN f.name LIKE " + bind("%" + escapedLike(QString(trimmed).remove('"')) + "%") + " ESCAPE '\\' THEN 40 ELSE 0 END";
+            reason = "CASE WHEN hits.fid IS NOT NULL THEN 'Matched passage' || CASE WHEN COALESCE(hits.locator,'')<>'' THEN ' · '||hits.locator ELSE '' END ELSE 'Matched in filename or metadata' END";
+            passageId="hits.pid";passageOrdinal="hits.ordinal";anchorType="hits.anchor_type";pageNumber="hits.page_number";charStart="hits.char_start";charEnd="hits.char_end";timeStartMs="hits.time_start_ms";locator="hits.locator";
         }
-
-        if (!fileMatchesAdvancedFilters(file,
-                                        statusFilters,
-                                        extensionFilters,
-                                        documentTypeFilters,
-                                        dateField,
-                                        dateFrom,
-                                        dateTo)) {
-            continue;
-        }
-
-        if (collectionId >= 0) {
-            bool manualMatch = false;
-            const QSet<int> assigned = fileToCollections.value(file.id);
-            for (int assignedCollectionId : assigned) {
-                if (subtreeSet.contains(assignedCollectionId)) {
-                    manualMatch = true;
-                    break;
-                }
-            }
-
-            bool autoMatch = false;
-            for (auto it = rulesByCollection.constBegin(); it != rulesByCollection.constEnd(); ++it) {
-                const QList<QVariantMap>& rules = it.value();
-                if (rules.isEmpty()) {
-                    continue;
-                }
-
-                bool allRulesMatch = true;
-                for (const QVariantMap& rule : rules) {
-                    if (!ruleMatchesFile(file,
-                                         rule.value("fieldName").toString(),
-                                         rule.value("operatorType").toString(),
-                                         rule.value("value").toString())) {
-                        allRulesMatch = false;
-                        break;
-                    }
-                }
-
-                if (allRulesMatch) {
-                    autoMatch = true;
-                    break;
-                }
-            }
-
-            if (!manualMatch && !autoMatch) {
-                continue;
-            }
-        }
-
-        FileRecord rankedFile = file;
-        if (contentMatch) {
-            rankedFile.searchSnippet = contentMatches.value(file.id).second;
-            rankedFile.searchScore += 120.0;
-            rankedFile.searchScore += (-1.0 * contentMatches.value(file.id).first);
-        }
-
-        if (!trimmedSearch.isEmpty()) {
-            if (contentMatch && metadataMatch) {
-                rankedFile.searchMatchReason = QStringLiteral("Matched in indexed content and metadata");
-            } else if (contentMatch) {
-                rankedFile.searchMatchReason = QStringLiteral("Matched in indexed content");
-            } else if (metadataMatch) {
-                rankedFile.searchMatchReason = QStringLiteral("Matched in filename or metadata");
-            }
-        } else {
-            rankedFile.searchMatchReason.clear();
-        }
-
-        if (!trimmedSearch.isEmpty() && rankedFile.searchSnippet.trimmed().isEmpty()) {
-            if (file.remarks.contains(trimmedSearch, Qt::CaseInsensitive) && !file.remarks.trimmed().isEmpty()) {
-                rankedFile.searchSnippet = file.remarks.left(220);
-            } else if (file.source.contains(trimmedSearch, Qt::CaseInsensitive) && !file.source.trimmed().isEmpty()) {
-                rankedFile.searchSnippet = QStringLiteral("Source: %1").arg(file.source);
-            } else if (file.path.contains(trimmedSearch, Qt::CaseInsensitive)) {
-                rankedFile.searchSnippet = QStringLiteral("Path: %1").arg(file.path);
-            } else if (file.name.contains(trimmedSearch, Qt::CaseInsensitive)) {
-                rankedFile.searchSnippet = QStringLiteral("Title: %1").arg(file.name);
-            }
-        }
-
-        if (!trimmedSearch.isEmpty()) {
-            if (file.name.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 40.0;
-            if (file.path.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 20.0;
-            if (file.documentType.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 15.0;
-            if (file.subject.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 10.0;
-            if (file.subtopic.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 10.0;
-            if (file.technicalDomain.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 10.0;
-            if (file.author.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 8.0;
-            if (file.remarks.contains(trimmedSearch, Qt::CaseInsensitive)) rankedFile.searchScore += 6.0;
-        }
-
-        result.append(rankedFile);
     }
-
-    std::sort(result.begin(), result.end(),
-              [&](const FileRecord& a, const FileRecord& b) {
-                  auto compareStrings = [](const QString& lhs, const QString& rhs) -> int {
-                      const QString left = lhs.toLower();
-                      const QString right = rhs.toLower();
-                      if (left < right) {
-                          return -1;
-                      }
-                      if (left > right) {
-                          return 1;
-                      }
-                      return 0;
-                  };
-
-                  auto compareDateTimes = [](const QDateTime& lhs, const QDateTime& rhs) -> int {
-                      if (lhs < rhs) {
-                          return -1;
-                      }
-                      if (lhs > rhs) {
-                          return 1;
-                      }
-                      return 0;
-                  };
-
-                  int cmp = 0;
-                  if (!trimmedSearch.isEmpty() && a.searchScore != b.searchScore) {
-                      cmp = (a.searchScore > b.searchScore) ? -1 : 1;
-                  } else if (sortField == "name") {
-                      cmp = compareStrings(a.name, b.name);
-                  } else if (sortField == "modifiedAt") {
-                      cmp = compareDateTimes(a.modifiedAt, b.modifiedAt);
-                  } else if (sortField == "createdAt") {
-                      cmp = compareDateTimes(a.createdAt, b.createdAt);
-                  } else if (sortField == "sizeBytes") {
-                      if (a.sizeBytes < b.sizeBytes) {
-                          cmp = -1;
-                      } else if (a.sizeBytes > b.sizeBytes) {
-                          cmp = 1;
-                      }
-                  } else if (sortField == "path") {
-                      cmp = compareStrings(a.path, b.path);
-                  } else {
-                      cmp = compareDateTimes(a.indexedAt, b.indexedAt);
-                  }
-
-                  if (cmp == 0) {
-                      cmp = compareStrings(a.name, b.name);
-                  }
-                  if (cmp == 0 && a.id != b.id) {
-                      cmp = (a.id < b.id) ? -1 : 1;
-                  }
-
-                  return sortAscending ? (cmp < 0) : (cmp > 0);
-              });
-
+    const QString from = " FROM files f " + join + " WHERE " + where.join(" AND ");
+    const QHash<QString,QString> sortColumns{{"name","name"},{"path","path"},{"sizeBytes","size_bytes"},{"modifiedAt","modified_at"},{"createdAt","created_at"},{"indexedAt","indexed_at"}};
+    QString sql = cte + "SELECT f.*, " + snippet + " AS search_snippet," + score + " AS search_score," + reason + " AS search_reason," + passageId + " AS search_passage_id," + passageOrdinal + " AS search_passage_ordinal," + anchorType + " AS search_anchor_type," + pageNumber + " AS search_page_number," + charStart + " AS search_char_start," + charEnd + " AS search_char_end," + timeStartMs + " AS search_time_start_ms," + locator + " AS search_locator" + from;
+    sql += " ORDER BY " + (trimmed.isEmpty() ? QString() : QStringLiteral("search_score DESC, ")) + "f." + sortColumns.value(sortField,"indexed_at") + (sortAscending ? " ASC" : " DESC") + ",f.id ASC";
+    if (limit >= 0) sql += " LIMIT " + QString::number(limit) + " OFFSET " + QString::number(qMax(0,offset));
+    QSqlQuery query(database()); query.prepare(sql);
+    for (auto it=parameters.cbegin();it!=parameters.cend();++it) query.bindValue(it.key(),it.value());
+    if (!query.exec()) { qWarning() << "Library search failed:" << query.lastError().text(); if(totalCount)*totalCount=0; return result; }
+    while(query.next()) { FileRecord file=fileFromQuery(query); file.searchSnippet=query.value("search_snippet").toString(); file.searchScore=query.value("search_score").toDouble(); file.searchMatchReason=query.value("search_reason").toString(); if(!query.value("search_passage_id").isNull())file.searchAnchor={{"passageId",query.value("search_passage_id")},{"passageOrdinal",query.value("search_passage_ordinal")},{"anchorType",query.value("search_anchor_type")},{"pageNumber",query.value("search_page_number")},{"charStart",query.value("search_char_start")},{"charEnd",query.value("search_char_end")},{"timeStartMs",query.value("search_time_start_ms")},{"locator",query.value("search_locator")},{"quote",file.searchSnippet}}; result << file; }
+    if (totalCount) {
+        QSqlQuery count(database()); count.prepare(cte + "SELECT COUNT(*)" + from);
+        // Bind only placeholders present in this statement; score-only parameters are absent.
+        const QString countSql = count.lastQuery();
+        for(auto it=parameters.cbegin();it!=parameters.cend();++it) {
+            QRegularExpression parameter(QRegularExpression::escape(it.key()) + "(?![0-9])");
+            if(countSql.contains(parameter)) count.bindValue(it.key(),it.value());
+        }
+        *totalCount = count.exec() && count.next() ? count.value(0).toInt() : result.size();
+    }
     return result;
 }
-
 QVariantMap FileRepository::getFileDetails(int fileId) const
 {
     QVariantMap m;
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare("SELECT * FROM files WHERE id = ?");
     q.addBindValue(fileId);
 
@@ -1025,6 +913,17 @@ QVariantMap FileRepository::getFileDetails(int fileId) const
     return m;
 }
 
+bool FileRepository::fileById(int fileId, FileRecord* result) const
+{
+    if (!result || fileId < 0) return false;
+    QSqlQuery query(database());
+    query.prepare(QStringLiteral("SELECT * FROM files WHERE id=? AND removed_at IS NULL"));
+    query.addBindValue(fileId);
+    if (!query.exec() || !query.next()) return false;
+    *result = fileFromQuery(query);
+    return true;
+}
+
 
 
 QVariantMap FileRepository::getFileDetailsByPath(const QString& absolutePath) const
@@ -1036,7 +935,7 @@ QVariantMap FileRepository::getFileDetailsByPath(const QString& absolutePath) co
         return m;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare("SELECT id FROM files WHERE path = ?");
     q.addBindValue(normalizedPath);
 
@@ -1125,7 +1024,7 @@ bool FileRepository::addCollection(const QString& name, int parentCollectionId)
         return false;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         INSERT OR IGNORE INTO collections (name, parent_collection_id)
         VALUES (?, ?)
@@ -1151,7 +1050,7 @@ bool FileRepository::renameCollection(int collectionId, const QString& newName)
         return false;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         UPDATE collections
         SET name = ?
@@ -1179,7 +1078,7 @@ bool FileRepository::deleteCollection(int collectionId)
         return false;
     }
 
-    QSqlDatabase db = DatabaseManager::instance().database();
+    QSqlDatabase db = database();
     if (!db.transaction()) {
         qWarning() << "Failed to start delete collection transaction:" << db.lastError().text();
         return false;
@@ -1286,7 +1185,7 @@ QVariantList FileRepository::getCollectionPickerOptions() const
 
 bool FileRepository::assignFileToCollection(int fileId, int collectionId)
 {
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         INSERT OR IGNORE INTO file_collections (file_id, collection_id)
         VALUES (?, ?)
@@ -1308,7 +1207,7 @@ bool FileRepository::removeFileFromCollection(int fileId, int collectionId)
         return false;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         DELETE FROM file_collections
         WHERE file_id = ? AND collection_id = ?
@@ -1328,7 +1227,7 @@ QStringList FileRepository::getFileCollections(int fileId) const
 {
     QStringList list;
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         SELECT c.name
         FROM collections c
@@ -1354,7 +1253,7 @@ QVariantList FileRepository::getFileCollectionAssignments(int fileId) const
 {
     QVariantList list;
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         WITH RECURSIVE collection_paths AS (
             SELECT
@@ -1409,7 +1308,7 @@ bool FileRepository::addCollectionRule(int collectionId,
         return false;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         INSERT INTO collection_rules (collection_id, field_name, operator_type, value)
         VALUES (?, ?, ?, ?)
@@ -1433,7 +1332,7 @@ bool FileRepository::deleteCollectionRule(int ruleId)
         return false;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare("DELETE FROM collection_rules WHERE id = ?");
     q.addBindValue(ruleId);
 
@@ -1453,7 +1352,7 @@ QVariantList FileRepository::getCollectionRules(int collectionId) const
         return rules;
     }
 
-    QSqlQuery q(DatabaseManager::instance().database());
+    QSqlQuery q(database());
     q.prepare(R"(
         SELECT id, field_name, operator_type, value
         FROM collection_rules
