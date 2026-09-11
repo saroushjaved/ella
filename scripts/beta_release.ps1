@@ -126,8 +126,14 @@ Compress-Archive -Path (Join-Path $stagePath '*') -DestinationPath $portable -Co
 $outputs = @($portable)
 if (-not $PortableOnly) {
     $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
-    $isccPath = if ($iscc) { $iscc.Source } else { 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' }
-    if (-not (Test-Path -LiteralPath $isccPath)) { throw 'Inno Setup 6 is required. Use -PortableOnly only for a non-release package check.' }
+    $isccCandidates = @(
+        $(if ($iscc) { $iscc.Source }),
+        $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe' }),
+        'C:\Program Files (x86)\Inno Setup 6\ISCC.exe',
+        'C:\Program Files\Inno Setup 6\ISCC.exe'
+    ) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+    $isccPath = $isccCandidates | Select-Object -First 1
+    if (-not $isccPath -or -not (Test-Path -LiteralPath $isccPath)) { throw 'Inno Setup 6 is required. Use -PortableOnly only for a non-release package check.' }
     Invoke-Checked $isccPath @("/DAppVersion=$Version","/DSourceDir=$stagePath","/DOutputDir=$releasePath",(Join-Path $repoRoot 'packaging/ella-beta.iss'))
     $installer = Join-Path $releasePath "ella-win64-$Version-installer.exe"
     if (-not (Test-Path -LiteralPath $installer)) { throw 'Installer was not produced.' }

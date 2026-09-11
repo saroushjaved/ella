@@ -11,6 +11,11 @@
 #ifndef OutputDir
   #define OutputDir "..\artifacts"
 #endif
+#ifdef SmokeBuild
+  #define EllaAppId "{{60C916FC-2D86-4B98-A6D8-490A9F542C2E}"
+#else
+  #define EllaAppId "{{81FB878B-06E2-4B25-9E91-180F305451E2}"
+#endif
 
 [Setup]
 AppName=ELLA
@@ -22,9 +27,10 @@ OutputBaseFilename=ella-win64-{#AppVersion}-installer
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
-AppId={{81FB878B-06E2-4B25-9E91-180F305451E2}
+PrivilegesRequired=lowest
+AppId={#EllaAppId}
 CloseApplications=yes
 RestartApplications=no
 LicenseFile={#SourceDir}\LICENSE.txt
