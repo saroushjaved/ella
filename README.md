@@ -49,7 +49,9 @@ reading, notes, and ownership settings.
 
 ## Build on Windows
 
-ELLA pins Qt 6.11.1 and MinGW 13.1 x64. Install Qt PDF with the Qt SDK.
+ELLA pins Qt 6.11.1 and MinGW 13.1 x64. Qt 6.11 publishes Qt PDF
+through its extensions repository; CI installs the pinned, verified archive with
+`scripts/install_qt_pdf_extension.ps1`.
 
 ```powershell
 cmake -S . -B build-dev -G "MinGW Makefiles" `

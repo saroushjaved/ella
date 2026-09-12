@@ -34,9 +34,17 @@ jobs:
         with:
           version: ${{ env.QT_VERSION }}
           arch: "win64_mingw"
-          modules: "qtpdf qtshadertools"
-          tools: "tools_mingw1310"
+          modules: "qtshadertools"
+          tools: "tools_mingw1310,qt.tools.win64_mingw1310"
+          aqtversion: "==3.3.*"
+          py7zrversion: "==1.1.*"
           set-env: "true"
+
+      # Qt 6.11 publishes Qt PDF in the extensions repository rather than the
+      # desktop module feed consumed by install-qt-action/aqtinstall.
+      - name: Install Qt PDF extension
+        shell: pwsh
+        run: ./scripts/install_qt_pdf_extension.ps1 -QtRoot $env:QT_ROOT_DIR
 
       - name: Use Qt bundled MinGW toolchain
         shell: pwsh
