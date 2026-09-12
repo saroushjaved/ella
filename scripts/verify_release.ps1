@@ -9,7 +9,16 @@ foreach ($name in $manifest.required) {
 }
 $files = @(Get-ChildItem -LiteralPath $stage -File -Recurse | ForEach-Object {
     $relative = $_.FullName.Substring($stage.Length + 1).Replace('\','/')
-    foreach ($pattern in $manifest.forbiddenPatterns) { if ($relative -match $pattern) { throw "Forbidden core-runtime file: $relative" } }
+    foreach ($pattern in $manifest.forbiddenPatterns) {
+        if ($relative -match $pattern) {
+            # MinGW ships LGPL texts with names such as COPYING.LIB. They are
+            # plain-text notices, not linker libraries, and must remain in the
+            # redistributable runtime.
+            $isCopyingLibNotice = $pattern -eq '\.lib$' -and
+                $relative -match '^licenses/.*/[^/]*COPYING[^/]*\.LIB$'
+            if (-not $isCopyingLibNotice) { throw "Forbidden core-runtime file: $relative" }
+        }
+    }
     if ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Runtime contains a linked file: $relative" }
     [pscustomobject][ordered]@{ path=$relative; bytes=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 })

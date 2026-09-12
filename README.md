@@ -51,7 +51,9 @@ reading, notes, and ownership settings.
 
 ELLA pins Qt 6.11.1 and MinGW 13.1 x64. Qt 6.11 publishes Qt PDF
 through its extensions repository; CI installs the pinned, verified archive with
-`scripts/install_qt_pdf_extension.ps1`.
+`scripts/install_qt_pdf_extension.ps1`. The Windows CI bootstrap also carries a
+small, guarded compatibility patch for the unreleased fix to aqtinstall's Qt
+6.11 Windows repository mapping.
 
 ```powershell
 cmake -S . -B build-dev -G "MinGW Makefiles" `

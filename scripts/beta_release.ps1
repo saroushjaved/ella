@@ -117,8 +117,12 @@ foreach ($relative in $unusedStylePaths) {
 Invoke-Checked (Join-Path $MingwBin 'strip.exe') @('--strip-unneeded',(Join-Path $stagePath $manifest.application))
 $licensesSource = Join-Path $QtRoot 'licenses'
 if (-not (Test-Path -LiteralPath $licensesSource)) { $licensesSource = Join-Path (Split-Path (Split-Path $QtRoot -Parent) -Parent) 'Licenses' }
+if (-not (Test-Path -LiteralPath $licensesSource)) { $licensesSource = Join-Path $repoRoot 'packaging/licenses/qt' }
 if (-not (Test-Path -LiteralPath $licensesSource)) { throw 'Qt license texts are missing; cannot publish an incomplete runtime.' }
 Copy-Item -LiteralPath $licensesSource -Destination (Join-Path $stagePath 'licenses') -Recurse
+$mingwLicenseSource = Join-Path (Split-Path $MingwBin -Parent) 'licenses'
+if (-not (Test-Path -LiteralPath $mingwLicenseSource -PathType Container)) { throw 'MinGW runtime license texts are missing; cannot publish an incomplete runtime.' }
+Copy-Item -LiteralPath $mingwLicenseSource -Destination (Join-Path $stagePath 'licenses/mingw') -Recurse
 & (Join-Path $PSScriptRoot 'verify_release.ps1') -StageDir $stagePath -ReportDir $releasePath
 $portable = Join-Path $releasePath "ella-win64-$Version-portable.zip"
 if (Test-Path -LiteralPath $portable) { Remove-Item -LiteralPath $portable -Force }

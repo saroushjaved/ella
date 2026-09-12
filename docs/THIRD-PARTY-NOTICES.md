@@ -11,7 +11,10 @@ Quick, QuickControls2, Network, Concurrent, Sql, Pdf and PdfQuick, together with
 their deployed plugins and compiler runtime libraries. Qt contains additional
 third-party code (including PDFium in Qt PDF). The packaging script copies the
 Qt distribution's license texts into `licenses/`; those texts and Qt's own
-third-party attributions apply. Preserve the ability to replace dynamically
+third-party attributions apply. The repository carries the Qt open-source
+license text used when aqtinstall does not provide the Qt Installer's global
+license directory, and packaging copies the MinGW toolchain's own notices.
+Preserve the ability to replace dynamically
 linked Qt libraries when distributing under the applicable LGPL terms.
 
 - Qt source and license overview: https://www.qt.io/licensing/open-source-lgpl-obligations
